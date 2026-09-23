@@ -1,0 +1,133 @@
+"""Atlas Plugin SDK — the stable boundary plugins may import.
+
+Plugins import only this package. Anything a plugin needs to declare itself,
+consume core services, publish events or look up contracts is re-exported here.
+"""
+
+from __future__ import annotations
+
+from .capability import CapabilityId
+from .command import Command, CommandHandler
+from .context import (
+    AssignmentPort,
+    AuditPort,
+    AuthorizationPort,
+    EventPublisherPort,
+    JobsPort,
+    NotificationPort,
+    OrganizationPort,
+    PeoplePort,
+    PluginContext,
+    PolicyPort,
+    SchedulingPort,
+    ScopePort,
+    WorkflowPort,
+)
+from .contract import Contract, ContractDeclaration, ContractId, ContractImplementation
+from .errors import (
+    AlreadyRegisteredError,
+    AtlasError,
+    AuthorizationError,
+    DuplicateError,
+    NotFoundError,
+    OutboxError,
+    PluginDependencyError,
+    PluginDiscoveryError,
+    PluginError,
+    PluginLifecycleError,
+    PluginRegistrationError,
+    PluginValidationError,
+    PolicyError,
+    RegistryError,
+    ScopeError,
+)
+from .event import DomainEvent, EventEnvelope, EventId
+from .manifest import ClusterManifest, ModuleDeclaration, PluginManifest
+from .plugin import Plugin, PluginLifecycle
+from .query import Query, QueryHandler
+from .registry import (
+    CapabilityRegistryPort,
+    ClusterRegistryPort,
+    ContractRegistryPort,
+    EventRegistryPort,
+    PluginRegistryPort,
+)
+from .types import (
+    Assignment,
+    AuditEntry,
+    Employee,
+    Job,
+    Notification,
+    Organization,
+    ScheduledJob,
+    Scope,
+    WorkflowCase,
+    Workplace,
+    WorkplaceType,
+)
+
+__version__ = "0.1.0"
+
+__all__ = [
+    "AlreadyRegisteredError",
+    "Assignment",
+    "AssignmentPort",
+    "AtlasError",
+    "AuditEntry",
+    "AuditPort",
+    "AuthorizationError",
+    "AuthorizationPort",
+    "CapabilityId",
+    "CapabilityRegistryPort",
+    "DuplicateError",
+    "ClusterManifest",
+    "ClusterRegistryPort",
+    "Command",
+    "CommandHandler",
+    "Contract",
+    "ContractDeclaration",
+    "ContractId",
+    "ContractImplementation",
+    "ContractRegistryPort",
+    "DomainEvent",
+    "Employee",
+    "EventEnvelope",
+    "EventId",
+    "EventPublisherPort",
+    "EventRegistryPort",
+    "Job",
+    "JobsPort",
+    "ModuleDeclaration",
+    "NotFoundError",
+    "Notification",
+    "NotificationPort",
+    "Organization",
+    "OrganizationPort",
+    "OutboxError",
+    "PeoplePort",
+    "Plugin",
+    "PluginContext",
+    "PluginDependencyError",
+    "PluginDiscoveryError",
+    "PluginError",
+    "PluginLifecycle",
+    "PluginLifecycleError",
+    "PluginManifest",
+    "PluginRegistrationError",
+    "PluginValidationError",
+    "PluginRegistryPort",
+    "PolicyError",
+    "PolicyPort",
+    "Query",
+    "QueryHandler",
+    "RegistryError",
+    "ScheduledJob",
+    "SchedulingPort",
+    "Scope",
+    "ScopeError",
+    "ScopePort",
+    "Workplace",
+    "WorkplaceType",
+    "WorkflowCase",
+    "WorkflowPort",
+]

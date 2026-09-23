@@ -1,0 +1,50 @@
+[project]
+name = "atlas-hq"
+version = "0.1.0"
+description = "Atlas-HQ — HR-centered modular plugin platform foundation"
+requires-python = ">=3.12"
+readme = "README.md"
+# ponytail: SQLite now; the URL is the only swap needed for Postgres later
+# (psycopg is deliberately absent until a server is actually reachable).
+dependencies = ["SQLAlchemy>=2.0"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.9",
+    "pyright>=1.1.350",
+]
+
+[project.scripts]
+atlas-hq = "atlas_hq.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra --basetemp=.pytest-tmp"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.pyright]
+include = ["src", "tests"]
+extraPaths = ["src"]
+typeCheckingMode = "basic"
+venvPath = "."
+venv = ".venv"
+reportMissingImports = "error"
