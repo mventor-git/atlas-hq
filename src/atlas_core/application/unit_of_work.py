@@ -16,7 +16,7 @@ Usage::
 
 from __future__ import annotations
 
-from typing import Protocol, Self
+from typing import TYPE_CHECKING, Protocol, Self
 
 from .repositories import (
     AssignmentRepositoryPort,
@@ -27,6 +27,22 @@ from .repositories import (
     OutboxRepositoryPort,
     WorkplaceRepositoryPort,
 )
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
+
+
+class SessionFactoryPort(Protocol):
+    """Sessions sharing this unit of work's transaction (contract section 22).
+
+    Plugins that own tables reach the *same* transaction the platform commits
+    through this port — never a connection of their own — so a plugin's state
+    change and the event it published commit together or not at all (§21).
+    """
+
+    def __call__(self) -> Session:
+        """A session already sharing this unit of work's transaction."""
+        ...
 
 
 class UnitOfWorkPort(Protocol):
@@ -39,6 +55,8 @@ class UnitOfWorkPort(Protocol):
     assignments: AssignmentRepositoryPort
     audit: AuditRepositoryPort
     outbox: OutboxRepositoryPort
+    #: Sessions sharing this transaction, for plugins that own tables (§22).
+    sessions: SessionFactoryPort
 
     def begin(self) -> None:
         """Start a transaction. Idempotent: a nested begin is a no-op."""
@@ -53,4 +71,4 @@ class UnitOfWorkPort(Protocol):
         ...
 
 
-__all__ = ["UnitOfWorkPort"]
+__all__ = ["SessionFactoryPort", "UnitOfWorkPort"]

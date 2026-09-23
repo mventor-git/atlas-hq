@@ -12,12 +12,13 @@ guarantee observable rather than merely asserted.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from types import TracebackType
 from typing import Self
 
 from sqlalchemy.orm import Session
 
-from ...application.unit_of_work import UnitOfWorkPort
+from ...application.unit_of_work import SessionFactoryPort, UnitOfWorkPort
 from .orm import Base
 from .repositories import (
     AssignmentRepository,
@@ -42,6 +43,9 @@ class SqlUnitOfWork(UnitOfWorkPort):
         self.assignments = AssignmentRepository(session)
         self.audit = AuditRepository(session)
         self.outbox = OutboxRepository(session)
+        #: Plugins that own tables share this transaction through this callable
+        #: (contract section 22): one session, one commit, one rollback.
+        self.sessions: SessionFactoryPort = _SharedSessionFactory(session)
 
     @property
     def session(self) -> Session:
@@ -78,6 +82,21 @@ def create_schema(session: Session) -> None:
     """Create the core schema if it does not exist. Idempotent."""
     if session.bind is not None:
         Base.metadata.create_all(session.bind, checkfirst=True)
+
+
+@dataclass(frozen=True)
+class _SharedSessionFactory:
+    """Returns the one session of the unit of work it belongs to.
+
+    A plugin calls ``context.sessions()`` to reach the transaction the platform
+    will commit for it; handing back the unit of work's own session is what
+    keeps a plugin's writes from escaping that transaction.
+    """
+
+    session: Session
+
+    def __call__(self) -> Session:
+        return self.session
 
 
 __all__ = ["SqlUnitOfWork", "create_schema"]

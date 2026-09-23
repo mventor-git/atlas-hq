@@ -26,6 +26,7 @@ atlas_demo_consumer = "atlas_plugins.atlas_demo_consumer:AtlasDemoConsumerPlugin
 report_studio = "atlas_plugins.report_studio:ReportStudioPlugin"
 workforce_summary = "atlas_plugins.workforce_summary:WorkforceSummaryPlugin"
 attendance_summary = "atlas_plugins.attendance_summary:AttendanceSummaryPlugin"
+workplace_operations = "atlas_plugins.workplace_operations:WorkplaceOperationsPlugin"
 
 [build-system]
 requires = ["setuptools>=68"]

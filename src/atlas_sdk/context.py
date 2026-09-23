@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Protocol
+from typing import Any, Protocol, Self
 
 from .capability import CapabilityId
 from .contract import ContractId
@@ -37,6 +37,30 @@ from .types import (
     Workplace,
     WorkplaceType,
 )
+
+
+class SessionFactoryPort(Protocol):
+    """A factory of SQLAlchemy sessions sharing the plugin context's transaction.
+
+    Plugins that own persistence (contract section 22: a plugin's tables are its
+    own) need a session bound to the *same* unit of work the platform commits,
+    so a plugin's state change and its outbox event land in one transaction or
+    not at all (contract section 21). The plugin creates its tables and reads or
+    writes through sessions from this port; it never owns a transaction.
+    """
+
+    def __call__(self) -> Any:
+        """A session already sharing the plugin context's transaction."""
+        ...
+
+
+class UnitOfWorkPort(Protocol):
+    """A unit of work the plugin may begin, if the plugin needs its own one."""
+
+    def __enter__(self) -> Self: ...
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None: ...
+    def commit(self) -> None: ...
+    def rollback(self) -> None: ...
 
 
 class PeoplePort(Protocol):
@@ -272,6 +296,13 @@ class PluginContext:
     capabilities: CapabilityRegistryPort
     contracts: ContractRegistryPort
     events_registry: EventRegistryPort
+    #: Persistence the plugin may own (contract section 22). Sessions from this
+    #: factory share the platform's transaction for this plugin, so the plugin's
+    #: state changes commit with its outbox events — or not at all.
+    sessions: SessionFactoryPort
+    #: A unit of work the plugin may begin itself, for multi-step flows. The
+    #: platform commits the plugin's transaction; the plugin never commits.
+    unit_of_work: UnitOfWorkPort
 
 
 __all__ = [
@@ -288,6 +319,8 @@ __all__ = [
     "PolicyPort",
     "SchedulingPort",
     "ScopePort",
+    "SessionFactoryPort",
+    "UnitOfWorkPort",
     "WorkflowPort",
     "OrganizationPort",
 ]

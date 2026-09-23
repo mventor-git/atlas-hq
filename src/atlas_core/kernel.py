@@ -153,8 +153,15 @@ class Kernel:
             capabilities=self.registries.capabilities,
             contracts=self.registries.contracts,
             events_registry=self.registries.events,
+            sessions=uow.sessions,
+            unit_of_work=uow,
         )
         self._contexts[plugin_id] = context
+        # The platform owns the transaction (contract section 21). A plugin's
+        # own service surface is called directly, not through the registry
+        # invoker, so it needs the same commit hook the invoker uses —
+        # otherwise its state change and its outbox event escape the transaction.
+        self.registries.contracts.register_committer(plugin_id, context.unit_of_work.commit)
         return context
 
     # --- boot -------------------------------------------------------------

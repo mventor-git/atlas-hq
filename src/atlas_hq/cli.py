@@ -55,6 +55,16 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("organization_id")
     report.add_argument("--actor", default="cli")
 
+    workplace = sub.add_parser("workplace", help="workplaces and their workforce")
+    workplace_sub = workplace.add_subparsers(dest="workplace_command", required=True)
+
+    wp_list = workplace_sub.add_parser("list", help="list workplaces of an organization")
+    wp_list.add_argument("organization_id")
+    wp_list.add_argument("--kind", help="filter by workplace type (e.g. site, office)")
+
+    wp_workforce = workplace_sub.add_parser("workforce", help="show the workforce of a workplace")
+    wp_workforce.add_argument("workplace_id")
+
     return parser
 
 
@@ -241,6 +251,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if command == "report":
         return _run_report(args)
 
+    if command == "workplace":
+        return _run_workplace(args)
+
     kernel, result = boot_kernel(args)
 
     if command == "plugins":
@@ -309,6 +322,68 @@ def _plugin_instance(kernel: Kernel, plugin_id: str):
     """
     instances = getattr(kernel, "_instances", {})
     return instances.get(plugin_id)
+
+
+def _run_workplace(args: argparse.Namespace) -> int:
+    """List workplaces and show a workplace's workforce through the real plugin.
+
+    The workplace plugin's own services are the only path to its tables, so the
+    CLI enables the plugin and calls it — it never queries ``wpop_*`` itself.
+    """
+    from atlas_plugins.workplace_operations import (
+        WorkplaceOperationsPlugin,
+    )
+    from atlas_sdk import Scope, WorkplaceType
+
+    kernel, result = boot_kernel(args)
+    kernel.enable_all()
+
+    plugin = _plugin_instance(kernel, "workplace_operations")
+    if plugin is None or not isinstance(plugin, WorkplaceOperationsPlugin):
+        print("workplace_operations is not installed; cannot administer workplaces")  # noqa: T201
+        return 2
+
+    command = args.workplace_command
+
+    if command == "list":
+        organization_id = args.organization_id
+        kind = WorkplaceType(args.kind) if args.kind else None
+        # The CLI acts as a platform administrator granted the view capability.
+        plugin.context.authorization.grant(
+            "cli",
+            "role.workplace_viewer",
+            Scope(organization_id=organization_id),
+        )
+        workplaces = plugin.list_workplaces(organization_id, kind)
+        lines = [f"Workplaces in {organization_id} ({len(workplaces)}):"]
+        for workplace in workplaces:
+            lines.append(f"{INDENT}{workplace.code} [{workplace.kind.value}] {workplace.name}")
+            lines.append(f"{INDENT * 2}id: {workplace.workplace_id}")
+        print("\n".join(lines))  # noqa: T201
+        return 0
+
+    if command == "workforce":
+        workplace_id = args.workplace_id
+        context = plugin.resolve_context(workplace_id)
+        plugin.context.authorization.grant(
+            "cli",
+            "role.workplace_viewer",
+            Scope(organization_id=context.organization_id),
+        )
+        members = plugin.list_workforce(workplace_id)
+        lines = [
+            f"{context.name} [{context.kind.value}] ({context.code})",
+            f"{INDENT}workforce: {len(members)} member(s)",
+        ]
+        for member in members:
+            lines.append(
+                f"{INDENT}{member.employee_number} {member.full_name} ({member.employee_id})",
+            )
+        print("\n".join(lines))  # noqa: T201
+        return 0
+
+    print(f"unknown workplace command: {command!r}")  # noqa: T201
+    return 2
 
 
 if __name__ == "__main__":

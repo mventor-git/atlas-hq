@@ -23,6 +23,8 @@ from .context import (
     PolicyPort,
     SchedulingPort,
     ScopePort,
+    SessionFactoryPort,
+    UnitOfWorkPort,
     WorkflowPort,
 )
 from .contract import Contract, ContractDeclaration, ContractId, ContractImplementation
@@ -131,6 +133,8 @@ __all__ = [
     "Scope",
     "ScopeError",
     "ScopePort",
+    "SessionFactoryPort",
+    "UnitOfWorkPort",
     "Workplace",
     "WorkplaceType",
     "WorkflowCase",

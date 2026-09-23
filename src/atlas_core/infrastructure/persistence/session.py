@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -29,6 +29,25 @@ def resolve_database_url(url: str | None = None) -> str:
     return os.environ.get(ENV_VAR, DEFAULT_SQLITE_URL)
 
 
+def _sqlite_engine(url: str) -> Engine:
+    """SQLite with WAL mode.
+
+    The outbox dispatcher commits its own transaction while plugin sessions may
+    still be open; the default rollback-journal mode serializes those as a hard
+    lock. WAL permits a writer alongside readers, so dispatch never deadlocks
+    against an idle plugin transaction. Postgres needs no equivalent.
+    """
+    engine = create_engine(url, future=True)
+    with engine.connect() as connection:
+        connection.execute(text("PRAGMA journal_mode=WAL"))
+        connection.commit()
+    return engine
+
+
+def _build_engine(url: str) -> Engine:
+    return _sqlite_engine(url) if url.startswith("sqlite") else create_engine(url, future=True)
+
+
 def create_session_factory(url: str | None = None) -> sessionmaker[Session]:
     """Build a session factory bound to ``url``.
 
@@ -36,8 +55,9 @@ def create_session_factory(url: str | None = None) -> sessionmaker[Session]:
     committed rows into read models after commit, and re-fetching them from an
     expired session would defeat that.
     """
-    engine = create_engine(resolve_database_url(url), future=True)
-    return sessionmaker(bind=engine, expire_on_commit=False, future=True)
+    return sessionmaker(
+        bind=_build_engine(resolve_database_url(url)), expire_on_commit=False, future=True
+    )
 
 
 class SessionFactory:
@@ -64,9 +84,7 @@ class SessionFactory:
 def create_session_factory_with_engine(
     url: str | None = None,
 ) -> tuple[SessionFactory, Engine]:
-    factory = SessionFactory(
-        create_engine(resolve_database_url(url), future=True),
-    )
+    factory = SessionFactory(_build_engine(resolve_database_url(url)))
     return factory, factory.engine
 
 
