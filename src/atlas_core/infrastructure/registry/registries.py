@@ -12,7 +12,9 @@ silently overwriting another plugin's entry.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import replace
+from typing import Any
 
 from atlas_sdk import (
     AlreadyRegisteredError,
@@ -28,6 +30,18 @@ from atlas_sdk import (
 from atlas_sdk.manifest import ClusterManifest
 
 from ...domain.clusters import INITIAL_CLUSTERS
+
+
+def _rollback_safely(commit: Callable[[], None]) -> None:
+    """Roll back the unit of work behind a registered commit hook.
+
+    A handler that raises must leave no half-applied state behind. The rollback
+    lives on the same unit of work as ``commit`` (``uow.rollback``), reached
+    through the bound method rather than a second registry entry.
+    """
+    rollback = getattr(getattr(commit, "__self__", None), "rollback", None)
+    if callable(rollback):
+        rollback()
 
 
 class InMemoryClusterRegistry:
@@ -171,20 +185,38 @@ class InMemoryContractRegistry:
     Every implementation of a contract is kept, not just the first: composability
     (contract section 13) depends on a consumer being able to ask "who provides
     this?" and learn there may be several.
+
+    Binding is the runtime half that makes Gate I real: a declaration is indexed
+    at boot, but the live handler is only attached when its plugin is enabled and
+    detached when it is disabled. ``invoke`` on an unbound contract raises, so a
+    disabled plugin's contracts are genuinely uncallable.
     """
 
     def __init__(self) -> None:
         self._declarations: list[ContractImplementation] = []
+        self._bindings: dict[tuple[str, str], Any] = {}
+        #: plugin_id -> commit callback. The kernel supplies one per enabled
+        #: plugin; a contract invocation commits the provider's unit of work so
+        #: the state change and its outbox event land together (contract section 21).
+        #: A plugin that is not enabled has no entry, so its contracts cannot run.
+        self._committers: dict[str, Callable[[], None]] = {}
 
     def register(self, declaration: ContractDeclaration, plugin_id: str) -> None:
         self._declarations.append(
             ContractImplementation(declaration=declaration, plugin_id=plugin_id),
         )
 
+    def _view(self, impl: ContractImplementation) -> ContractImplementation:
+        """The declaration with its bound instance attached, if the plugin is on."""
+        instance = self._bindings.get((str(impl.declaration.contract_id), impl.plugin_id))
+        if instance is None:
+            return impl
+        return replace(impl, instance=instance)
+
     def get(self, contract_id: ContractId) -> ContractImplementation:
         for impl in self._declarations:
             if impl.declaration.contract_id == contract_id:
-                return impl
+                return self._view(impl)
         raise NotFoundError(
             f"no contract registered as {contract_id!r}",
             kind="contract",
@@ -192,20 +224,100 @@ class InMemoryContractRegistry:
         )
 
     def all(self) -> list[ContractImplementation]:
-        return list(self._declarations)
+        return [self._view(impl) for impl in self._declarations]
 
     def exists(self, contract_id: ContractId) -> bool:
         return any(impl.declaration.contract_id == contract_id for impl in self._declarations)
 
     def implementations_of(self, contract_id: ContractId) -> list[ContractImplementation]:
-        return [impl for impl in self._declarations if impl.declaration.contract_id == contract_id]
+        return [
+            self._view(impl)
+            for impl in self._declarations
+            if impl.declaration.contract_id == contract_id
+        ]
 
     def provided_by(self, plugin_id: str) -> list[ContractImplementation]:
-        return [impl for impl in self._declarations if impl.plugin_id == plugin_id]
+        return [self._view(impl) for impl in self._declarations if impl.plugin_id == plugin_id]
+
+    # --- runtime half ------------------------------------------------------
+
+    def register_committer(self, plugin_id: str, commit: Callable[[], None]) -> None:
+        self._committers[plugin_id] = commit
+
+    def bind(self, contract_id: ContractId, plugin_id: str, instance: object) -> None:
+        key = (str(contract_id), plugin_id)
+        if not any(
+            impl.declaration.contract_id == contract_id and impl.plugin_id == plugin_id
+            for impl in self._declarations
+        ):
+            raise NotFoundError(
+                f"plugin {plugin_id!r} cannot bind {contract_id!r}: it declares no such contract",
+                kind="contract",
+                key=contract_id,
+            )
+        self._bindings[key] = instance
+
+    def unbind(self, plugin_id: str) -> None:
+        self._bindings = {
+            key: value for key, value in self._bindings.items() if key[1] != plugin_id
+        }
+        self._committers.pop(plugin_id, None)
+
+    def _bound(self, contract_id: ContractId) -> list[tuple[str, Any]]:
+        return [
+            (pid, value) for (cid, pid), value in self._bindings.items() if cid == str(contract_id)
+        ]
+
+    def invoke(self, contract_id: ContractId, request: object) -> object:
+        bound = self._bound(contract_id)
+        if not bound:
+            raise NotFoundError(
+                f"no enabled implementation of contract {contract_id!r}",
+                kind="contract_binding",
+                key=contract_id,
+            )
+        plugin_id, instance = bound[0]
+        return self._invoke_one(contract_id, plugin_id, instance, request)
+
+    def invoke_all(self, contract_id: ContractId, request: object) -> list[object]:
+        return [
+            self._invoke_one(contract_id, plugin_id, instance, request)
+            for plugin_id, instance in self._bound(contract_id)
+        ]
+
+    def _invoke_one(
+        self,
+        contract_id: ContractId,
+        plugin_id: str,
+        instance: Any,
+        request: object,
+    ) -> object:
+        """Run one handler inside its provider's transaction.
+
+        Committing here — not inside the plugin — is deliberate. A plugin never
+        manages the transaction itself; the platform guarantees that a state
+        change and the event it published commit together or not at all
+        (contract section 21).
+        """
+        commit = self._committers.get(plugin_id)
+        try:
+            result = instance.handle(request)
+        except Exception:
+            if commit is not None:
+                _rollback_safely(commit)
+            raise
+        if commit is not None:
+            commit()
+        return result
 
 
 class InMemoryEventRegistry:
-    """Adapts :class:`~atlas_sdk.registry.EventRegistryPort`."""
+    """Adapts :class:`~atlas_sdk.registry.EventRegistryPort`.
+
+    Publishers and subscribers are indexed separately. A plugin may publish an
+    event it does not subscribe to and vice versa; the registry keeps both
+    directions so a consumer can find every interested party without a scan.
+    """
 
     def __init__(self) -> None:
         self._publishers: dict[EventId, set[str]] = {}

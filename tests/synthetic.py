@@ -19,6 +19,12 @@ Name: {name}
 Version: {version}
 """
 
+#: An entry-point group no real distribution advertises. Tests that want a
+#: registry containing only their synthetic plugin boot the kernel against this
+#: group; the five real plugins stay invisible to them (contract section 17:
+#: isolation is by entry point, not by folder).
+TEST_ENTRY_POINT_GROUP = "atlas.test.plugins"
+
 PLUGIN_MODULE_TEMPLATE = """\
 from __future__ import annotations
 
@@ -48,6 +54,24 @@ class {class_name}(Plugin):
         publishes_events={publishes_events},
         subscribes_events={subscribes_events},
     )
+
+    def initialize(self, context):
+        self.context = context
+        self._handler = _Handler(context)
+
+    def bind_contracts(self):
+        for declaration in self.manifest.provides_contracts:
+            self.context.contracts.bind(
+                declaration.contract_id, self.manifest.plugin_id, self._handler
+            )
+
+
+class _Handler:
+    def __init__(self, context):
+        self.context = context
+
+    def handle(self, request):
+        return {{"echo": request, "plugin_id": self.context.plugin_id}}
 """
 
 
@@ -70,6 +94,7 @@ def write_distribution(
     publishes_events: tuple[str, ...] = ("synthetic.generated",),
     subscribes_events: tuple[str, ...] = (),
     entry_point_name: str | None = None,
+    group: str = TEST_ENTRY_POINT_GROUP,
 ) -> Path:
     """Write a module + ``.dist-info`` exposing an ``atlas.plugins`` entry point.
 
@@ -106,7 +131,7 @@ def write_distribution(
     (dist_info / "entry_points.txt").write_text(
         textwrap.dedent(
             f"""\
-            [{PLUGIN_ENTRY_POINT_GROUP}]
+            [{group}]
             {entry_name} = {module_name}:{class_name}
             """,
         ),
@@ -129,6 +154,14 @@ def refresh_metadata_cache() -> None:
 
     importlib.invalidate_caches()
     metadata.MetadataPathFinder.invalidate_caches()
+
+
+__all__ = [
+    "PLUGIN_ENTRY_POINT_GROUP",
+    "TEST_ENTRY_POINT_GROUP",
+    "refresh_metadata_cache",
+    "write_distribution",
+]
 
 
 # --- source emitters ------------------------------------------------------

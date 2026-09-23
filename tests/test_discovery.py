@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tests.synthetic import refresh_metadata_cache, write_distribution
+from tests.synthetic import TEST_ENTRY_POINT_GROUP, refresh_metadata_cache, write_distribution
 
 from atlas_core.infrastructure.discovery import (
     PLUGIN_ENTRY_POINT_GROUP,
@@ -40,7 +40,7 @@ def test_discovers_an_installed_distribution(
     )
     refresh_metadata_cache()
 
-    discovered = discover_plugins()
+    discovered = discover_plugins(TEST_ENTRY_POINT_GROUP)
 
     assert len(discovered) == 1
     found = discovered[0]
@@ -76,7 +76,7 @@ def test_discovered_manifest_carries_modules_and_contracts(
     )
     refresh_metadata_cache()
 
-    found = discover_plugins()[0]
+    found = discover_plugins(TEST_ENTRY_POINT_GROUP)[0]
     manifest = found.manifest
 
     assert manifest.module_ids() == ("attendance.daily",)
@@ -106,7 +106,7 @@ def test_discovering_two_distributions(isolated_plugins: Path) -> None:
     )
     refresh_metadata_cache()
 
-    ids = sorted(p.plugin_id for p in discover_plugins())
+    ids = sorted(p.plugin_id for p in discover_plugins(TEST_ENTRY_POINT_GROUP))
     assert ids == ["alpha.plugin", "beta.plugin"]
 
 
@@ -123,7 +123,7 @@ def test_a_distribution_without_the_group_is_ignored(
     )
     refresh_metadata_cache()
 
-    assert discover_plugins() == []
+    assert discover_plugins(TEST_ENTRY_POINT_GROUP) == []
 
 
 def test_an_unloadable_entry_point_raises_discovery_error(
@@ -137,13 +137,13 @@ def test_an_unloadable_entry_point_raises_discovery_error(
         encoding="utf-8",
     )
     (dist_info / "entry_points.txt").write_text(
-        "[atlas.plugins]\nbroken = nonexistent_module:NoSuchClass\n",
+        "[" + TEST_ENTRY_POINT_GROUP + "]\nbroken = nonexistent_module:NoSuchClass\n",
         encoding="utf-8",
     )
     refresh_metadata_cache()
 
     try:
-        discover_plugins()
+        discover_plugins(TEST_ENTRY_POINT_GROUP)
     except PluginDiscoveryError as exc:
         assert "broken" in str(exc)
         assert "synthetic" not in str(exc) or "broken" in str(exc)
@@ -165,13 +165,13 @@ def test_an_entry_point_that_is_not_a_plugin_raises(
         encoding="utf-8",
     )
     (dist_info / "entry_points.txt").write_text(
-        "[atlas.plugins]\nwidget = not_a_plugin:Widget\n",
+        f"[{TEST_ENTRY_POINT_GROUP}]\nwidget = not_a_plugin:Widget\n",
         encoding="utf-8",
     )
     refresh_metadata_cache()
 
     try:
-        discover_plugins()
+        discover_plugins(TEST_ENTRY_POINT_GROUP)
     except PluginDiscoveryError as exc:
         assert "atlas_sdk.Plugin" in str(exc)
     else:

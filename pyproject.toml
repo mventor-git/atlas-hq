@@ -18,6 +18,15 @@ dev = [
 [project.scripts]
 atlas-hq = "atlas_hq.cli:main"
 
+# Gate C — real entry points in the ``atlas.plugins`` group. Discovery reads
+# these and nothing else; adding a plugin never touches core (contract section 17).
+[project.entry-points."atlas.plugins"]
+atlas_demo = "atlas_plugins.atlas_demo:AtlasDemoPlugin"
+atlas_demo_consumer = "atlas_plugins.atlas_demo_consumer:AtlasDemoConsumerPlugin"
+report_studio = "atlas_plugins.report_studio:ReportStudioPlugin"
+workforce_summary = "atlas_plugins.workforce_summary:WorkforceSummaryPlugin"
+attendance_summary = "atlas_plugins.attendance_summary:AttendanceSummaryPlugin"
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"

@@ -41,6 +41,14 @@ class AuthorizationService(AuthorizationPort):
             RoleAssignment(subject_id=subject_id, role_id=role, scope=scope),
         )
 
+    def register_role(
+        self,
+        role_id: str,
+        name: str,
+        capabilities: frozenset[CapabilityId],
+    ) -> None:
+        self._roles[role_id] = Role(role_id=role_id, name=name, capabilities=capabilities)
+
     def check(self, capability: CapabilityId, scope: Scope, subject_id: str) -> bool:
         for assignment in self._assignments:
             if assignment.subject_id != subject_id:

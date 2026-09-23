@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tests.synthetic import refresh_metadata_cache, write_distribution
+from tests.synthetic import TEST_ENTRY_POINT_GROUP, refresh_metadata_cache, write_distribution
 
 from atlas_core.kernel import Kernel
 from atlas_sdk import (
@@ -216,7 +216,7 @@ def test_booting_twice_is_idempotent(kernel: Kernel) -> None:
 
 def test_a_kernel_without_persistence_still_boots() -> None:
     """Registry boot does not depend on a database being configured."""
-    kernel = Kernel()
+    kernel = Kernel(entry_point_group=TEST_ENTRY_POINT_GROUP)
     result = kernel.boot()
 
     assert result.discovered == 0

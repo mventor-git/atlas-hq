@@ -12,9 +12,11 @@ defined now and exercised in D2.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from enum import Enum
 from typing import TYPE_CHECKING, ClassVar
 
+from .event import DomainEvent, EventId
 from .manifest import PluginManifest
 
 if TYPE_CHECKING:
@@ -52,6 +54,23 @@ class Plugin:
 
     def initialize(self, context: PluginContext) -> None:
         """Called once after registration, before the plugin may be enabled."""
+
+    def bind_contracts(self) -> None:
+        """Register contract handlers against ``self.context.contracts``.
+
+        Called on enable. A plugin binds handlers for the contracts its manifest
+        declares it provides; unbinding happens automatically when the plugin is
+        disabled, which is what makes a disabled plugin's contracts uncallable.
+        """
+
+    def bind_subscriptions(self) -> Mapping[EventId, Callable[[DomainEvent], None]]:
+        """Event subscriptions this plugin wants while enabled.
+
+        Return a mapping of another plugin's published event id to a handler.
+        The ids are literal strings (contract section 9); the publisher's module
+        is never imported.
+        """
+        return {}
 
     def on_enable(self) -> None:
         """Called when the plugin transitions to ENABLED."""

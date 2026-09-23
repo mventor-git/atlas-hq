@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tests.synthetic import refresh_metadata_cache, write_distribution
+from tests.synthetic import TEST_ENTRY_POINT_GROUP, refresh_metadata_cache, write_distribution
 
 from atlas_hq.cli import build_parser, main, render_json, render_state
 
@@ -19,7 +19,7 @@ def test_main_with_no_plugins_reports_the_seeded_clusters(
     isolated_plugins: Path,
     capsys: object,
 ) -> None:
-    exit_code = main([])
+    exit_code = main(["--entry-point-group", TEST_ENTRY_POINT_GROUP])
 
     assert exit_code == 0
     output = capsys.readouterr().out  # type: ignore[attr-defined]
@@ -45,7 +45,7 @@ def test_main_reports_a_registered_plugin(
     )
     refresh_metadata_cache()
 
-    exit_code = main([])
+    exit_code = main(["--entry-point-group", TEST_ENTRY_POINT_GROUP])
     output = capsys.readouterr().out  # type: ignore[attr-defined]
 
     assert exit_code == 0
@@ -74,7 +74,7 @@ def test_main_reports_a_failed_plugin(
     )
     refresh_metadata_cache()
 
-    exit_code = main([])
+    exit_code = main(["--entry-point-group", TEST_ENTRY_POINT_GROUP])
     output = capsys.readouterr().out  # type: ignore[attr-defined]
 
     assert exit_code == 1
@@ -98,10 +98,10 @@ def test_json_output_is_valid(isolated_plugins: Path) -> None:
     refresh_metadata_cache()
 
     parser = build_parser()
-    args = parser.parse_args(["--json"])
+    parser.parse_args(["--json"])
     from atlas_core.kernel import Kernel
 
-    kernel = Kernel(entry_point_group=args.entry_point_group)
+    kernel = Kernel(entry_point_group=TEST_ENTRY_POINT_GROUP)
     result = kernel.boot()
 
     payload = json.loads(render_json(kernel, result))

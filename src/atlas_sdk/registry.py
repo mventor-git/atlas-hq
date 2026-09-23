@@ -72,9 +72,26 @@ class ContractRegistryPort(Protocol):
     def implementations_of(self, contract_id: ContractId) -> list[ContractImplementation]:
         """Every registered implementation of a contract (composability, section 13)."""
         ...
-        ...
 
     def provided_by(self, plugin_id: str) -> list[ContractImplementation]: ...
+
+    # --- runtime half (Gate I) --------------------------------------------
+
+    def bind(self, contract_id: ContractId, plugin_id: str, instance: object) -> None:
+        """Attach the live contract object of an ENABLED plugin."""
+        ...
+
+    def unbind(self, plugin_id: str) -> None:
+        """Detach every contract of a plugin that is no longer enabled."""
+        ...
+
+    def invoke(self, contract_id: ContractId, request: object) -> object:
+        """Call the single bound implementation of ``contract_id``."""
+        ...
+
+    def invoke_all(self, contract_id: ContractId, request: object) -> list[object]:
+        """Call every bound implementation, in registration order."""
+        ...
 
 
 class EventRegistryPort(Protocol):

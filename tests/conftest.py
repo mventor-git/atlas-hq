@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy.orm import Session
+from tests.synthetic import TEST_ENTRY_POINT_GROUP
 
 from atlas_core.infrastructure.persistence.session import create_session_factory_with_engine
 from atlas_core.infrastructure.persistence.unit_of_work import SqlUnitOfWork, create_schema
@@ -45,14 +46,29 @@ def uow_factory(session_factory: Callable[[], Session]) -> Callable[[], SqlUnitO
 
 @pytest.fixture
 def kernel(uow_factory: Callable[[], SqlUnitOfWork]) -> Kernel:
-    """A kernel wired to the test database."""
-    return Kernel(uow_factory=uow_factory)
+    """A kernel wired to the test database.
+
+    It boots against the test-only entry-point group so the five plugins shipped
+    in this distribution never appear in a unit test's registry. Tests that
+    specifically exercise the real plugins opt into the real group.
+    """
+    return Kernel(uow_factory=uow_factory, entry_point_group=TEST_ENTRY_POINT_GROUP)
 
 
 @pytest.fixture
 def clean_uow(uow_factory: Callable[[], SqlUnitOfWork]) -> SqlUnitOfWork:
     """A single unit of work with the schema created."""
     return uow_factory()
+
+
+@pytest.fixture
+def real_kernel(uow_factory: Callable[[], SqlUnitOfWork]) -> Kernel:
+    """A kernel that discovers the plugins shipped in this distribution.
+
+    Used by the D2 acceptance tests, which are the ones that must see the real
+    entry-point-registered plugins.
+    """
+    return Kernel(uow_factory=uow_factory)
 
 
 @pytest.fixture

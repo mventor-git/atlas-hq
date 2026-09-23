@@ -11,13 +11,14 @@ core depends on the SDK's published language, never the reverse.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Protocol
 
 from .capability import CapabilityId
-from .event import DomainEvent
+from .contract import ContractId
+from .event import DomainEvent, EventId
 from .registry import (
     CapabilityRegistryPort,
     ContractRegistryPort,
@@ -94,6 +95,21 @@ class AuthorizationPort(Protocol):
 
     def grant(self, subject_id: str, role: str, scope: Scope) -> None:
         """Assign ``role`` to ``subject_id`` within ``scope``."""
+        ...
+
+    def register_role(
+        self,
+        role_id: str,
+        name: str,
+        capabilities: frozenset[CapabilityId],
+    ) -> None:
+        """Publish a role through which a plugin's own capabilities can be granted.
+
+        A plugin declares a capability in its manifest, but before an
+        administrator can grant that capability to anybody a role carrying it has
+        to exist. Plugins call this at initialize time; the platform's own roles
+        are seeded by the core. Calling twice with the same id is a refresh.
+        """
         ...
 
 
@@ -201,6 +217,39 @@ class EventPublisherPort(Protocol):
         """Append an event to the outbox of the current transaction."""
 
 
+class EventDispatcherPort(Protocol):
+    """In-process event subscription (contract section 21).
+
+    Plugins subscribe to the *event id* string of another plugin's event. They
+    never import the publishing plugin, and the publisher has no way to know who
+    is listening — the registry is the only channel (contract section 9).
+    """
+
+    def subscribe(self, event_id: EventId, subscriber: Callable[[DomainEvent], None]) -> None:
+        """Register ``subscriber`` to be called whenever ``event_id`` is dispatched."""
+        ...
+
+    def unsubscribe(self, event_id: EventId, subscriber: Callable[[DomainEvent], None]) -> None: ...
+
+
+class ContractInvokerPort(Protocol):
+    """Call a contract provided by *some* plugin, discovered by id (§9, §13).
+
+    The caller never knows which plugin implements the contract. The registry
+    resolves the declaration; this port runs the bound instance. Invoking an
+    unbound contract — no enabled plugin provides it — raises
+    :class:`~atlas_sdk.NotFoundError`.
+    """
+
+    def invoke(self, contract_id: ContractId, request: object) -> object:
+        """Run the single enabled implementation of ``contract_id``."""
+        ...
+
+    def invoke_all(self, contract_id: ContractId, request: object) -> list[object]:
+        """Run every enabled implementation; composability (contract section 13)."""
+        ...
+
+
 @dataclass(frozen=True)
 class PluginContext:
     """Everything a plugin may reach. Plugins import this package, not core."""
@@ -218,6 +267,8 @@ class PluginContext:
     notification: NotificationPort
     scheduling: SchedulingPort
     events: EventPublisherPort
+    dispatcher: EventDispatcherPort
+    invoker: ContractInvokerPort
     capabilities: CapabilityRegistryPort
     contracts: ContractRegistryPort
     events_registry: EventRegistryPort
@@ -227,6 +278,8 @@ __all__ = [
     "AssignmentPort",
     "AuditPort",
     "AuthorizationPort",
+    "ContractInvokerPort",
+    "EventDispatcherPort",
     "EventPublisherPort",
     "JobsPort",
     "NotificationPort",

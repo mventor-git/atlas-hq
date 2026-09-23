@@ -13,9 +13,26 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import NewType, Protocol, TypeVar
+from typing import Any, NewType, Protocol, TypeVar
 
 ContractId = NewType("ContractId", str)
+
+#: Sentinel: a contract id declared by another plugin. Plugins publish the
+#: *literal string* of any contract id they did not declare themselves, so a
+#: consumer and a provider spell the same id without sharing a module. This
+#: constant exists only as the documentation of that rule; it is never required.
+SHARED = "shared"
+
+
+def shared_contract_id(value: str) -> ContractId:
+    """Spell another plugin's contract id without importing its module.
+
+    Contract section 9 forbids implementation coupling between plugins. Two
+    plugins that must agree on a contract id agree on the *string*, typed here
+    so the compiler still sees a :data:`ContractId`.
+    """
+    return ContractId(value)
+
 
 RequestT = TypeVar("RequestT")
 ResponseT = TypeVar("ResponseT")
@@ -42,10 +59,20 @@ class Contract(Protocol[RequestT, ResponseT]):
 
 @dataclass(frozen=True)
 class ContractImplementation:
-    """A registry record: which plugin provides which contract declaration."""
+    """A registry record: which plugin provides which contract declaration.
+
+    ``instance`` is the live contract object for ENABLED plugins (bound at
+    enable time); it is ``None`` for a plugin that is not enabled, which is how
+    Gate I makes a disabled plugin's contracts uncallable.
+    """
 
     declaration: ContractDeclaration
     plugin_id: str
+    instance: Contract[Any, Any] | None = None
+
+    @property
+    def is_bound(self) -> bool:
+        return self.instance is not None
 
 
 __all__ = [
