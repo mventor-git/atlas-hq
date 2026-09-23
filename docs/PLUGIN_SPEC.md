@@ -110,38 +110,50 @@ Both use the same manifest, same lifecycle, same entry-point registration.
 ## How to write one — the minimum
 
 ```python
-from atlas_sdk import (CapabilityId, Contract, ContractDeclaration, ContractId,
-                       DomainEvent, EventId, ModuleDeclaration, Plugin, PluginManifest)
+from atlas_sdk import (
+    CapabilityId,
+    Contract,
+    ContractDeclaration,
+    ContractId,
+    DomainEvent,
+    EventId,
+    ModuleDeclaration,
+    Plugin,
+    PluginManifest,
+)
 
-MY_CONTRACT = ContractId("my.thing")          # the public id — spell it, don't import it
-MY_EVENT    = EventId("my.thing.done")
-MY_CAP      = CapabilityId("my.thing.do")
+MY_CONTRACT = ContractId("my.thing")  # the public id — spell it, don't import it
+MY_EVENT = EventId("my.thing.done")
+MY_CAP = CapabilityId("my.thing.do")
+
 
 class MyContract(Contract[MyRequest, MyResponse]):
     contract_id = MY_CONTRACT
+
     def handle(self, request: MyRequest) -> MyResponse: ...
+
 
 class MyPlugin(Plugin):
     manifest = PluginManifest(
         plugin_id="my_plugin",
         name="My Plugin",
         version="0.1.0",
-        cluster_id="cluster.workforce_and_time",      # must be a registered cluster
+        cluster_id="cluster.workforce_and_time",  # must be a registered cluster
         requires_core="0.1.0",
-        modules=(ModuleDeclaration(module_id="my.thing",
-                                   provides=("my.thing",),
-                                   publishes=(MY_EVENT,)),),
+        modules=(
+            ModuleDeclaration(module_id="my.thing", provides=("my.thing",), publishes=(MY_EVENT,)),
+        ),
         provides_capabilities=(MY_CAP,),
-        provides_contracts=(ContractDeclaration(contract_id=MY_CONTRACT, version="1.0",
-                                                description="…"),),
+        provides_contracts=(
+            ContractDeclaration(contract_id=MY_CONTRACT, version="1.0", description="…"),
+        ),
         publishes_events=(MY_EVENT,),
     )
 
     def initialize(self, context):
         self.context = context
         self._handler = MyContract(context)
-        context.authorization.register_role("role.my_operator", "My Operator",
-                                            frozenset({MY_CAP}))
+        context.authorization.register_role("role.my_operator", "My Operator", frozenset({MY_CAP}))
 
     def bind_contracts(self):
         self.context.contracts.bind(MY_CONTRACT, self.manifest.plugin_id, self._handler)

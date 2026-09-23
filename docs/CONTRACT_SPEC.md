@@ -19,11 +19,15 @@ Authority: `contract.md` §9, §13, §14.
 class ContractDeclaration:
     contract_id: ContractId
     version: str = "1.0"
-    schema: Mapping[str, object] = field(default_factory=dict)   # JSON-schema-ish; NOT validated at runtime in D1
+    schema: Mapping[str, object] = field(
+        default_factory=dict
+    )  # JSON-schema-ish; NOT validated at runtime in D1
     description: str = ""
+
 
 class Contract(Protocol[RequestT, ResponseT]):
     contract_id: ContractId
+
     def handle(self, request: RequestT) -> ResponseT: ...
 ```
 
@@ -98,7 +102,8 @@ plugin id:
 
 ```python
 responses = self.context.invoker.invoke_all(
-    REPORT_DATASET_CONTRACT, DatasetRequest(organization_id=...),
+    REPORT_DATASET_CONTRACT,
+    DatasetRequest(organization_id=...),
 )
 datasets = [r for r in responses if isinstance(r, DatasetResponse)]
 ```
@@ -139,8 +144,8 @@ SDK-published shape (`DatasetResponse`) or treats the result structurally. See
 ## Where contracts appear in a manifest
 
 ```python
-provides_contracts=(ContractDeclaration(contract_id=..., version="1.0", schema={...}),)
-consumes_contracts=(ContractId("reporting.dataset"),)
+provides_contracts = (ContractDeclaration(contract_id=..., version="1.0", schema={...}),)
+consumes_contracts = (ContractId("reporting.dataset"),)
 ```
 
 Declaring `consumes_contracts` is **not** a hard dependency — it is metadata

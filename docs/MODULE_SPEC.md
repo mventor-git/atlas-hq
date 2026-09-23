@@ -32,7 +32,7 @@ ModuleDeclaration(
     module_id="demo.greeting",
     provides=("demo.greeting",),
     consumes=("people.employee.read",),
-    publishes=(DEMO_GREETED,),      # EventId("demo.greeted")
+    publishes=(DEMO_GREETED,),  # EventId("demo.greeted")
     requires=(),
     supports=(),
 )

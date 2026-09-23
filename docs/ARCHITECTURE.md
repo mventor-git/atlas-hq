@@ -103,10 +103,10 @@ self.registries.contracts.register_committer(plugin_id, uow.commit)
 And in `InMemoryContractRegistry._invoke_one()`:
 
 ```python
-result = instance.handle(request)   # plugin code runs
+result = instance.handle(request)  # plugin code runs
 ...
 if commit is not None:
-    commit()                        # the *platform* commits
+    commit()  # the *platform* commits
 ```
 
 Consequences:

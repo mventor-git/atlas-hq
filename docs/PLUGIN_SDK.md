@@ -110,8 +110,9 @@ Core maps its rich domain entities to these at the application-service boundary
 class Scope:
     organization_id: str | None = None
     workplace_id: str | None = None
+
     @property
-    def is_empty(self) -> bool: ...     # organization_id is None ⇒ "no access"
+    def is_empty(self) -> bool: ...  # organization_id is None ⇒ "no access"
 ```
 
 `scope.narrow(requested, subject)` intersects what an operation wants with what
@@ -125,8 +126,9 @@ scopes yield an empty scope rather than an error.
 
 ```python
 # at initialize — publish the role that carries your capability
-context.authorization.register_role("role.demo_greeter", "Demo Greeter",
-                                    frozenset({CapabilityId("demo.greet")}))
+context.authorization.register_role(
+    "role.demo_greeter", "Demo Greeter", frozenset({CapabilityId("demo.greet")})
+)
 
 # at runtime — check before acting
 if not context.authorization.check(MY_CAP, scope, actor_id):

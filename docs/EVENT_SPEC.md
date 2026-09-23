@@ -31,21 +31,23 @@ rolled-back transaction is invisible to it and is therefore never delivered.
 ## The shapes
 
 ```python
-EventId = NewType("EventId", str)          # the id IS the type: "demo.greeted"
+EventId = NewType("EventId", str)  # the id IS the type: "demo.greeted"
+
 
 @dataclass(frozen=True)
 class DomainEvent:
-    event_id: EventId                      # stable registry key + logical type
+    event_id: EventId  # stable registry key + logical type
     payload: dict[str, object]
-    occurred_at: datetime                  # UTC by default
+    occurred_at: datetime  # UTC by default
+
 
 @dataclass(frozen=True)
-class EventEnvelope:                       # the outbox record
+class EventEnvelope:  # the outbox record
     envelope_id: str
     event: DomainEvent
-    publisher: str | None                  # plugin id, if known
+    publisher: str | None  # plugin id, if known
     created_at: datetime
-    dispatched_at: datetime | None         # None ⇒ pending
+    dispatched_at: datetime | None  # None ⇒ pending
     attempts: int
     last_error: str | None
 ```
@@ -67,7 +69,7 @@ write in the unit of work.
 ## Dispatching
 
 ```python
-kernel.dispatcher.dispatch_pending(limit=100)   # returns the count routed
+kernel.dispatcher.dispatch_pending(limit=100)  # returns the count routed
 ```
 
 Delivery is **at-least-once within one process**: an envelope stays pending
