@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: atlas-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: atlas
+      POSTGRES_PASSWORD: atlas
+      POSTGRES_DB: atlas_hq
+    ports:
+      - "5433:5432"
+    volumes:
+      - atlas_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U atlas -d atlas_hq"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  atlas_postgres_data:

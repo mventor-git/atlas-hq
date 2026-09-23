@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 readme = "README.md"
 # ponytail: SQLite now; the URL is the only swap needed for Postgres later
 # (psycopg is deliberately absent until a server is actually reachable).
-dependencies = ["SQLAlchemy>=2.0"]
+dependencies = ["SQLAlchemy>=2.0", "psycopg[binary]>=3.2"]
 
 [project.optional-dependencies]
 dev = [
