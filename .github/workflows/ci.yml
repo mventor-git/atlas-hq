@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: atlas
+          POSTGRES_DB: atlas_hq
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - "127.0.0.1:5433:5432"
+        options: >-
+          --health-cmd "pg_isready -U atlas -d atlas_hq"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ATLAS_DATABASE_URL: postgresql+psycopg://atlas@localhost:5433/atlas_hq
+      ATLAS_TEST_DATABASE_URL: postgresql+psycopg://atlas@localhost:5433/atlas_hq
+      ATLAS_DATABASE_SCHEMA: atlas
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Create virtual environment
+        run: python -m venv .venv
+      - name: Install project and dev dependencies
+        run: .venv/bin/python -m pip install -e ".[dev]"
+      - name: Test
+        run: .venv/bin/python -m pytest -q
+      - name: Lint
+        run: .venv/bin/ruff check .
+      - name: Check formatting
+        run: .venv/bin/ruff format --check .
+      - name: Type check
+        run: .venv/bin/pyright
+      - name: CLI smoke check
+        run: |
+          .venv/bin/python -m atlas_hq.cli boot
+          .venv/bin/python -m atlas_hq.cli plugins

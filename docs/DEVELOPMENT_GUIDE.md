@@ -64,12 +64,19 @@ $env:ATLAS_TEST_DATABASE_URL = "postgresql+psycopg://atlas:atlas@localhost:5433/
 & .\.venv\Scripts\python.exe -m pytest          # PostgreSQL-only tests
 & .\.venv\Scripts\ruff.exe check src tests      # lint
 & .\.venv\Scripts\ruff.exe format --check src tests
-& .\.venv\Scripts\pyright.exe src               # type check (0 errors)
+& .\.venv\Scripts\pyright.exe                    # type check (0 errors)
 ```
 
 Ruff config (`pyproject.toml`): line-length 100, target py312, rules
 `E,F,W,I,N,UP,B,SIM`. Pyright: basic mode, `include = ["src","tests"]`,
 `reportMissingImports = "error"`.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs the PostgreSQL-only checks against an ephemeral
+PostgreSQL 16 service. The `test_engine` fixture creates and drops an isolated
+`atlas_test_*` schema for each test that uses it; CI never uses production data.
+Production deployment configuration is intentionally not defined yet.
 
 Tests run from the repo root; `pyproject.toml` sets `testpaths = ["tests"]` and
 `pythonpath = ["src"]`, so `src` is importable without an install for the test
@@ -132,8 +139,8 @@ The exact PostgreSQL-only test command is:
 & .\.venv\Scripts\python.exe -m pytest
 ```
 
-Tests create and remove an isolated PostgreSQL schema per test. The developer
-database and `public` schema are not reset.
+The `test_engine` fixture creates and removes an isolated PostgreSQL schema for
+each test that uses it. The developer database and `public` schema are not reset.
 
 ## The CLI
 
@@ -160,4 +167,4 @@ emits machine-readable registry state.
 - Core tables are owned by core alone; plugins never read or join them
   (`contract.md` §9, §22).
 
-Last updated: 2026-09-24
+Last updated: 2026-09-25

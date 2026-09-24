@@ -44,6 +44,12 @@ ATLAS_DATABASE_SCHEMA=atlas
 `ATLAS_TEST_DATABASE_URL` may use a separate PostgreSQL database when one is
 configured. There is no alternate database fallback or substitute.
 
+## Continuous integration
+
+The [development guide](docs/DEVELOPMENT_GUIDE.md#continuous-integration)
+documents the PostgreSQL-only CI workflow. Production deployment configuration
+is intentionally not defined yet.
+
 ## Quick commands
 
 ```bash
