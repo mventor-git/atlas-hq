@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from tests.synthetic import TEST_ENTRY_POINT_GROUP, refresh_metadata_cache, write_distribution
 
-from atlas_hq.cli import build_parser, main, render_json, render_state
+from atlas_hq.cli import build_parser, main, render_audit, render_json, render_state
 
 
 def test_parser_defaults() -> None:
@@ -126,3 +127,10 @@ def test_render_state_names_every_registry() -> None:
     assert "Capabilities" in report
     assert "Contracts" in report
     assert "Events" in report
+
+
+def test_audit_command_requires_database_backed_kernel() -> None:
+    from atlas_core.kernel import Kernel
+
+    with pytest.raises(RuntimeError, match="PostgreSQL-backed"):
+        render_audit(Kernel(), limit=10)

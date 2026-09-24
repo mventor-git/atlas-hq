@@ -9,8 +9,8 @@ contracts.
 (contract section 21): an envelope must be stored in the *same transaction* as
 the business state change it describes.
 
-A Postgres swap only changes the URL: every engine-wide choice is made in
-:mod:`atlas_core.infrastructure.persistence.session`.
+PostgreSQL is the only persistence dialect. The connection URL and schema search
+path are configured in :mod:`atlas_core.infrastructure.persistence.session`.
 """
 
 from __future__ import annotations

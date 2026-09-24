@@ -37,9 +37,6 @@ coverage.xml
 .DS_Store
 Thumbs.db
 
-# Local runtime data (SQLite dev DB, secrets)
-*.db
-*.sqlite
-*.sqlite3
+# Local secrets and runtime configuration
 atlas-hq.env
 .env

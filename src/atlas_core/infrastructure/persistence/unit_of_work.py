@@ -22,7 +22,6 @@ from sqlalchemy.orm import Session
 from atlas_sdk import PluginPersistencePort, TransactionRunnerPort
 
 from ...application.unit_of_work import SessionFactoryPort, UnitOfWorkPort
-from .orm import Base
 from .repositories import (
     AssignmentRepository,
     AuditRepository,
@@ -31,6 +30,15 @@ from .repositories import (
     OrganizationRepository,
     OutboxRepository,
     WorkplaceRepository,
+)
+from .session import (
+    create_schema as create_database_schema,
+)
+from .session import (
+    create_session_factory_with_engine,
+    ensure_schema,
+    require_bound_session,
+    resolve_database_schema,
 )
 
 T = TypeVar("T")
@@ -64,10 +72,8 @@ class PluginPersistenceAdapter(PluginPersistencePort):
         return self._session.scalars(statement)
 
     def create_schema(self, metadata: Any) -> None:
-        bind = self._session.bind
-        if bind is None:
-            return
-        engine = bind.engine if hasattr(bind, "engine") else bind
+        engine = require_bound_session(self._session)
+        ensure_schema(engine)
         metadata.create_all(engine, checkfirst=True)
 
 
@@ -108,6 +114,7 @@ class SqlUnitOfWork(UnitOfWorkPort):
     """One SQLAlchemy transaction exposing every repository the core needs."""
 
     def __init__(self, session: Session) -> None:
+        require_bound_session(session)
         self._session = session
         self._poisoned = False
         self.employees = EmployeeRepository(session)
@@ -173,9 +180,25 @@ class SqlUnitOfWork(UnitOfWorkPort):
 
 
 def create_schema(session: Session) -> None:
-    """Create the core schema if it does not exist. Idempotent."""
-    if session.bind is not None:
-        Base.metadata.create_all(session.bind, checkfirst=True)
+    """Create the core PostgreSQL schema if it does not exist. Idempotent."""
+    engine = require_bound_session(session)
+    create_database_schema(engine)
+
+
+def create_sql_uow_factory(
+    url: str | None = None,
+    *,
+    schema: str | None = None,
+) -> Callable[[], SqlUnitOfWork]:
+    """Build the production UoW factory after creating its PostgreSQL schema."""
+    safe_schema = resolve_database_schema(schema)
+    session_factory, engine = create_session_factory_with_engine(url, schema=safe_schema)
+    create_database_schema(engine, safe_schema)
+
+    def factory() -> SqlUnitOfWork:
+        return SqlUnitOfWork(session_factory())
+
+    return factory
 
 
 @dataclass(frozen=True)
@@ -197,4 +220,5 @@ __all__ = [
     "SqlTransactionRunner",
     "SqlUnitOfWork",
     "create_schema",
+    "create_sql_uow_factory",
 ]

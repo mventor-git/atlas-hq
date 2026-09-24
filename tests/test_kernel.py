@@ -8,10 +8,12 @@ than aborting the core (contract section 18).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from tests.synthetic import TEST_ENTRY_POINT_GROUP, refresh_metadata_cache, write_distribution
 
+from atlas_core.infrastructure.persistence.unit_of_work import SqlUnitOfWork
 from atlas_core.kernel import Kernel
 from atlas_sdk import (
     CapabilityId,
@@ -223,17 +225,10 @@ def test_a_kernel_without_persistence_still_boots() -> None:
     assert len(kernel.registries.clusters.all()) == 8
 
 
-def test_context_for_builds_a_plugin_context() -> None:
-    from atlas_core.infrastructure.persistence.session import create_session_factory_with_engine
-    from atlas_core.infrastructure.persistence.unit_of_work import SqlUnitOfWork, create_schema
+def test_context_for_builds_a_plugin_context(
+    uow_factory: Callable[[], SqlUnitOfWork],
+) -> None:
     from atlas_sdk.context import PluginContext
-
-    factory, _engine = create_session_factory_with_engine("sqlite://")
-
-    def uow_factory() -> SqlUnitOfWork:
-        session = factory()
-        create_schema(session)
-        return SqlUnitOfWork(session)
 
     wired = Kernel(uow_factory=uow_factory)
     context = wired.context_for("report.studio")

@@ -2,28 +2,23 @@
 
 ## Project: ATLAS-HQ — New Platform Foundation
 
-## Status: GREENFIELD / DO NOT CONTINUE ATLAS-BOT
+## Contract version: 1.1.0
+
+## Status: GREENFIELD / DO NOT CONTINUE PRIOR IMPLEMENTATIONS
 
 ## Priority: ARCHITECTURE FIRST, THEN IMPLEMENTATION
 
-You are not continuing the existing Atlas-bot codebase.
+You are starting a **new platform** from zero.
 
-You are starting a **new Atlas generation** from zero.
+Any prior implementation is outside the scope of this contract.
 
-The existing repository:
+Do not refactor, migrate, copy, or use a prior implementation as a technical reference.
 
-`https://github.com/mventor-git/atlas-bot`
+Do not inspect prior implementation source code to understand the new architecture.
 
-must now be treated as **LEGACY / ARCHIVED**.
+Do not assume any prior implementation decision remains valid.
 
-Do not refactor it.
-Do not migrate its architecture.
-Do not copy its internal code.
-Do not inspect its source code to understand the new architecture.
-Do not use it as a technical reference.
-Do not assume any old implementation decision remains valid.
-
-The old repository exists only as a historical artifact and must be preserved and archived.
+A prior repository may exist only as a historical artifact and must be preserved and archived.
 
 The new project is:
 
@@ -35,9 +30,9 @@ Build it as a completely new platform with a new architecture.
 
 # 1. THE PRODUCT IDEA
 
-Atlas is no longer:
+Atlas is not limited to:
 
-> "a Telegram bot with HR features."
+> "a single-purpose HR application."
 
 Atlas is:
 
@@ -207,7 +202,11 @@ Use:
 
 Use:
 
-# PostgreSQL as the primary database
+# PostgreSQL as the only supported database
+
+All runtime, development, migration, and test persistence must use PostgreSQL.
+
+No SQLite or other database engine may be used as a fallback or substitute.
 
 Use:
 
@@ -1022,7 +1021,11 @@ The internal event system must nevertheless have a clean abstraction so a future
 
 # 22. DATABASE ARCHITECTURE
 
-Use PostgreSQL.
+PostgreSQL is the exclusive database engine.
+
+There is no SQLite runtime, fallback, compatibility, or test path.
+
+Missing or non-PostgreSQL configuration must fail explicitly rather than select another engine.
 
 The database schema must respect module boundaries.
 
@@ -1082,7 +1085,7 @@ The new application must be called:
 
 # Atlas-HQ
 
-Do not carry the old product naming/structure forward.
+Do not carry prior implementation naming or structure forward.
 
 Atlas-HQ is the new administrative/control interface for the Atlas platform.
 
@@ -1244,11 +1247,11 @@ The Workplace Plugin should provide actual business services, not mock records.
 
 # 28. CONSTRUCTION REPORTING COMES AFTER THE FOUNDATION
 
-The old Atlas use case around construction daily workforce reporting remains valid as a business use case.
+The construction daily workforce reporting use case remains valid as a business use case.
 
 However:
 
-Do not rebuild it as the old Atlas-bot structure.
+Do not rebuild it using the structure of a prior implementation.
 
 Instead:
 
@@ -1266,41 +1269,23 @@ Report Studio consumes the appropriate Contracts and generates the report.
 
 ---
 
-# 29. LEGACY REPOSITORY HANDLING
+# 29. PRIOR REPOSITORY BOUNDARY
 
-The current:
+Any prior repository is outside Atlas-HQ.
 
-`mventor-git/atlas-bot`
-
-must be moved into a clearly archived state.
-
-Important:
-
-Before archiving, preserve its Git history.
+Preserve its Git history.
 
 Do not delete it.
-
 Do not rewrite its history.
-
 Do not migrate its source into Atlas-HQ.
+Do not copy its source into Atlas-HQ.
+Do not depend on it.
 
-The new project must not depend on it.
+Do not inspect its source as an architectural reference for Atlas-HQ.
 
-The relationship should become:
+Repository metadata may be inspected only for preservation and archival purposes.
 
-```text
-atlas-bot
-    = LEGACY ARCHIVE
-
-atlas-hq
-    = NEW GENERATION
-```
-
-You may inspect repository metadata necessary to archive/preserve the repository itself.
-
-You must NOT inspect its source code as an architectural reference for Atlas-HQ.
-
-After archival, treat the old repository as read-only historical material.
+After archival, treat it as read-only historical material.
 
 ---
 
@@ -1309,14 +1294,13 @@ After archival, treat the old repository as read-only historical material.
 Do not:
 
 ```text
-continue atlas-bot
-refactor atlas-bot
-migrate atlas-bot architecture
-copy old atlas-bot modules
-reuse old database schema by default
-assume old naming is correct
+continue or refactor a prior implementation
+migrate prior implementation architecture
+copy prior implementation modules
+reuse a prior implementation database schema by default
+assume prior implementation naming is correct
+hardcode prior product names into Core
 hardcode Site into Core
-hardcode Telegram into Core
 hardcode reports into individual Domains
 make Payroll own all incoming business data
 let Plugins read each other's tables
@@ -1337,7 +1321,7 @@ Do not declare the foundation complete until all of these are demonstrated.
 
 ## Gate A — Clean Greenfield
 
-Atlas-HQ builds and runs independently from atlas-bot.
+Atlas-HQ builds and runs independently from any prior implementation.
 
 ## Gate B — Core Services
 
@@ -1400,6 +1384,19 @@ Report Studio consumes at least two different Plugin-provided datasets without c
 # 32. TESTING REQUIREMENT
 
 Every architectural concept must have automated tests.
+
+Acceptance tests must run against a real PostgreSQL database with per-test isolated state.
+
+SQLite, in-memory database engines, and mocks are not substitutes.
+
+Acceptance coverage must include:
+
+```text
+schema creation
+commit and rollback
+outbox atomicity
+no state leakage between tests
+```
 
 At minimum:
 
@@ -1510,9 +1507,9 @@ Historical accountability
 → Audit
 ```
 
-Never solve ambiguity by copying old Atlas-bot architecture.
+Never solve ambiguity by copying prior implementation architecture.
 
-Never use the legacy codebase as the answer.
+Never use a prior codebase as the answer.
 
 The new architecture has priority.
 
@@ -1599,7 +1596,7 @@ Your immediate mission is:
 14. Establish Report Studio as first Composable Plugin proof.
 15. Establish Workplace Operations as first real Domain Plugin.
 16. Only then begin expanding business functionality.
-17. Archive atlas-bot and leave it untouched as legacy.
+17. Preserve and archive any prior repository; leave it untouched and read-only.
 ```
 
 Do not stop after creating empty folders or interfaces.

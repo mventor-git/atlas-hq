@@ -21,10 +21,9 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from atlas_sdk import PluginPersistencePort, WorkplaceType
 
-#: The logical owner of every table here. ``MetaData`` deliberately carries no
-#: physical schema: SQLite has no ``CREATE SCHEMA`` and PostgreSQL would need
-#: the schema pre-created, so like the core's own ORM the owner is a label plus
-#: a table-name prefix, not a namespace the dialect has to support.
+#: The logical owner of every table here. The platform supplies the physical
+#: PostgreSQL schema through the connection search path; table names remain
+#: prefixed so ownership is visible in the DDL.
 SCHEMA = "atlas"
 
 #: Every table this plugin owns is prefixed so ownership is visible in the DDL
@@ -103,9 +102,8 @@ class WorkplaceOperationsRepository:
     def create_schema(self) -> None:
         """Create this plugin's tables if they do not exist. Idempotent.
 
-        DDL on SQLite takes the write lock, so the platform adapter runs it on
-        a short-lived connection that closes immediately rather than retaining
-        the shared transaction session.
+        DDL runs on a short-lived engine connection that closes immediately,
+        rather than retaining the shared transaction session.
         """
         self._persistence.create_schema(Base.metadata)
 

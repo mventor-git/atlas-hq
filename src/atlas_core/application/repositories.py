@@ -1,9 +1,8 @@
 """Repository ports: the persistence seam (contract section 22).
 
-Application services talk to these ports; the SQLite adapters in
-``atlas_core.infrastructure.persistence`` implement them. A Postgres adapter can
-swap in behind the same ports without touching a single service — that is the
-entire point of the seam.
+Application services talk to these ports; the PostgreSQL adapter in
+``atlas_core.infrastructure.persistence`` implements them. The seam keeps
+application services independent of SQLAlchemy details.
 """
 
 from __future__ import annotations

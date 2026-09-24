@@ -5,7 +5,7 @@ The two paths that matter:
 * a committed state change delivers its event;
 * a rolled-back state change delivers nothing.
 
-Both are exercised against the real SQLite database, not a mock: the dispatcher
+Both are exercised against the real PostgreSQL database, not a mock: the dispatcher
 reads committed rows from a *fresh* transaction, so an envelope written by a
 transaction that rolled back is genuinely invisible to it.
 """

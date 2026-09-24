@@ -1,54 +1,109 @@
-"""Shared test fixtures.
+"""Shared fixtures for real PostgreSQL acceptance tests.
 
-Every persistence test runs against a real SQLite database (file-backed so the
-transactional outbox guarantee is exercised, not asserted). The factory below
-swaps in per test via a temp directory, so no test sees another's rows.
+Every test gets a fresh PostgreSQL schema. The schema name is generated per test,
+all pooled connections are pinned to it with a quoted search path, and teardown
+drops only that schema. The developer database and the ``public`` schema are
+never reset or truncated, so pytest workers can run in parallel safely.
 """
 
 from __future__ import annotations
 
+import os
+import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from tests.synthetic import TEST_ENTRY_POINT_GROUP
 
-from atlas_core.infrastructure.persistence.session import create_session_factory_with_engine
-from atlas_core.infrastructure.persistence.unit_of_work import SqlUnitOfWork, create_schema
+from atlas_core.infrastructure.persistence.session import (
+    SessionFactory,
+    create_schema,
+    create_session_factory_with_engine,
+    drop_schema,
+    resolve_database_url,
+)
+from atlas_core.infrastructure.persistence.unit_of_work import SqlUnitOfWork
 from atlas_core.kernel import Kernel
 
-
-@pytest.fixture
-def database_url(tmp_path: Path) -> str:
-    """A per-test SQLite file URL."""
-    return f"sqlite:///{tmp_path / 'atlas-test.db'}"
+TEST_DATABASE_ENV = "ATLAS_TEST_DATABASE_URL"
 
 
 @pytest.fixture
-def session_factory(database_url: str) -> Callable[[], Session]:
-    """A session factory bound to the test database."""
-    factory, _engine = create_session_factory_with_engine(database_url)
-    return factory
+def test_schema() -> str:
+    """A short, unique PostgreSQL schema name for this test only."""
+    return f"atlas_test_{uuid.uuid4().hex}"
 
 
 @pytest.fixture
-def uow_factory(session_factory: Callable[[], Session]) -> Callable[[], SqlUnitOfWork]:
-    """A unit-of-work factory that guarantees the schema exists first."""
+def database_url() -> str:
+    """The explicitly configured PostgreSQL URL used by database tests."""
+    configured = os.environ.get(TEST_DATABASE_ENV)
+    if not configured:
+        pytest.fail(
+            f"{TEST_DATABASE_ENV} must be set to a PostgreSQL URL; "
+            "no alternate database or substitute is supported"
+        )
+    return resolve_database_url(configured, env_var=TEST_DATABASE_ENV)
+
+
+@pytest.fixture
+def test_engine(database_url: str, test_schema: str) -> Iterator[Engine]:
+    """A real PostgreSQL engine with core tables in this test's schema."""
+    _factory, engine = create_session_factory_with_engine(database_url, schema=test_schema)
+    try:
+        create_schema(engine, test_schema)
+        yield engine
+    finally:
+        engine.dispose()
+        admin_engine = create_engine(resolve_database_url(database_url), future=True)
+        try:
+            drop_schema(admin_engine, test_schema)
+        finally:
+            admin_engine.dispose()
+
+
+@pytest.fixture
+def session_factory(test_engine: Engine) -> Iterator[Callable[[], Session]]:
+    """A session factory bound to the isolated test schema."""
+    sessions: list[Session] = []
+    factory_impl = SessionFactory(test_engine)
+
+    def factory() -> Session:
+        session = factory_impl()
+        sessions.append(session)
+        return session
+
+    yield factory
+    for session in sessions:
+        session.close()
+
+
+@pytest.fixture
+def uow_factory(
+    session_factory: Callable[[], Session],
+) -> Iterator[Callable[[], SqlUnitOfWork]]:
+    """A unit-of-work factory sharing one isolated PostgreSQL engine."""
+    units: list[SqlUnitOfWork] = []
 
     def factory() -> SqlUnitOfWork:
-        session = session_factory()
-        create_schema(session)
-        return SqlUnitOfWork(session)
+        unit = SqlUnitOfWork(session_factory())
+        units.append(unit)
+        return unit
 
-    return factory
+    yield factory
+    for unit in reversed(units):
+        unit.session.close()
 
 
 @pytest.fixture
 def kernel(uow_factory: Callable[[], SqlUnitOfWork]) -> Kernel:
-    """A kernel wired to the test database.
+    """A kernel wired to the isolated PostgreSQL database.
 
-    It boots against the test-only entry-point group so the five plugins shipped
+    It boots against the test-only entry-point group so the eight plugins shipped
     in this distribution never appear in a unit test's registry. Tests that
     specifically exercise the real plugins opt into the real group.
     """
@@ -57,7 +112,7 @@ def kernel(uow_factory: Callable[[], SqlUnitOfWork]) -> Kernel:
 
 @pytest.fixture
 def clean_uow(uow_factory: Callable[[], SqlUnitOfWork]) -> SqlUnitOfWork:
-    """A single unit of work with the schema created."""
+    """A single unit of work with the core schema already created."""
     return uow_factory()
 
 

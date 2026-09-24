@@ -14,7 +14,7 @@ How to add a plugin, how to verify, and where everything lives.
 | `src/atlas_core/infrastructure/discovery/` | entry-point discovery |
 | `src/atlas_core/infrastructure/registry/` | in-memory registries + manifest/dependency validation |
 | `src/atlas_core/kernel.py` | boot + plugin lifecycle |
-| `src/atlas_plugins/` | the 5 shipped plugins, one directory each |
+| `src/atlas_plugins/` | the 8 shipped plugins, one directory each |
 | `src/atlas_hq/cli.py` | the `atlas-hq` admin command |
 | `tests/` | mirrors src; `conftest.py` holds the fixtures, `synthetic.py` builds fake distributions |
 | `docs/` | this directory |
@@ -32,7 +32,7 @@ How to add a plugin, how to verify, and where everything lives.
    ```
 
 3. Reinstall the distribution so `importlib.metadata` sees it:
-   `.venv\Scripts\pip.exe install -e .`
+   `uv pip install -e . --no-deps`
 4. Verify: `& .\.venv\Scripts\atlas-hq.exe boot` — the plugin appears in the
    registry report; `& .\.venv\Scripts\atlas-hq.exe enable my_plugin` moves it
    to `enabled`.
@@ -60,7 +60,8 @@ the map is extensible by design (`contract.md` §7).
 ## Running the checks
 
 ```powershell
-& .\.venv\Scripts\python.exe -m pytest          # tests (139 passing as of D2)
+$env:ATLAS_TEST_DATABASE_URL = "postgresql+psycopg://atlas:atlas@localhost:5433/atlas_hq"
+& .\.venv\Scripts\python.exe -m pytest          # PostgreSQL-only tests
 & .\.venv\Scripts\ruff.exe check src tests      # lint
 & .\.venv\Scripts\ruff.exe format --check src tests
 & .\.venv\Scripts\pyright.exe src               # type check (0 errors)
@@ -76,14 +77,14 @@ run (but discovery needs the editable install).
 
 ### Test layout
 
-- `tests/conftest.py` — fixtures: `database_url` (per-test SQLite file),
+- `tests/conftest.py` — fixtures: `database_url` (real PostgreSQL test database),
   `session_factory`, `uow_factory`, `kernel`, `clean_uow`, `real_kernel`,
   `isolated_plugins`.
 - `tests/synthetic.py` — writes a real `.dist-info` + module onto `sys.path` so
   `importlib.metadata` discovers a synthetic plugin exactly as it would any
   installed package. Proves discovery works without editing core.
 - Unit-test kernels boot against the test-only group `atlas.test.plugins`
-  (`TEST_ENTRY_POINT_GROUP`) so the 5 shipped plugins stay invisible; the
+  (`TEST_ENTRY_POINT_GROUP`) so the 8 shipped plugins stay invisible; the
   acceptance tests use `real_kernel` (the real `atlas.plugins` group).
 
 Every architectural concept has automated tests (`contract.md` §32): kernel,
@@ -99,37 +100,51 @@ people/org/jobs/assignments, the CLI, the two demo plugins, and Report Studio.
 - `tests/test_report_studio.py` — Gate O: two dataset providers, no provider
   named in the test or in Report Studio source.
 
-## Database — Postgres is the contractual primary, SQLite is the current adapter
+## Database — PostgreSQL only
 
-`contract.md` §3 and §22 name PostgreSQL as the primary database. The adapter
-shipped today is **SQLite**, default URL `sqlite:///atlas.db`
-(`src/atlas_core/infrastructure/persistence/session.py`). The reason is
-practical: **no Postgres server is reachable on this development machine**,
-and `psycopg` is deliberately absent from the dependencies until a server is.
+`contract.md` §3 and §22 require PostgreSQL. The adapter accepts only
+`postgresql+psycopg` URLs; there is no alternate database fallback or
+substitute.
 
-The cost of that choice is intentionally **one line** — the connection URL.
-Everything else (sessions, the transactional outbox, the unit of work, the
-repositories) is dialect-agnostic and is exercised by the test suite against a
-real file-backed SQLite database, so the atomicity guarantee is tested, not
-asserted.
+Start the local service from `docker-compose.yml`:
 
-To swap:
+```powershell
+docker compose up -d
+```
 
-1. `pip install psycopg`
-2. Set `ATLAS_DATABASE_URL` to a `postgresql+psycopg://…` URL
-3. Run. No core or application code changes.
+Configure the runtime:
 
-`resolve_database_url()` reads: explicit argument → `ATLAS_DATABASE_URL` →
-`sqlite:///atlas.db`.
+```powershell
+$env:ATLAS_DATABASE_URL = "postgresql+psycopg://atlas:atlas@localhost:5433/atlas_hq"
+$env:ATLAS_DATABASE_SCHEMA = "atlas"
+```
+
+`ATLAS_DATABASE_SCHEMA` defaults to `atlas`. Tests use `ATLAS_TEST_DATABASE_URL`;
+set it to the same local service or a separately configured PostgreSQL database:
+
+```powershell
+$env:ATLAS_TEST_DATABASE_URL = "postgresql+psycopg://atlas:atlas@localhost:5433/atlas_hq"
+```
+
+The exact PostgreSQL-only test command is:
+
+```powershell
+& .\.venv\Scripts\python.exe -m pytest
+```
+
+Tests create and remove an isolated PostgreSQL schema per test. The developer
+database and `public` schema are not reset.
 
 ## The CLI
 
 ```text
-atlas-hq [--json] boot                                    discover, validate, register
+atlas-hq [--entry-point-group GROUP] [--json] boot
 atlas-hq plugins | clusters | contracts | capabilities | events
 atlas-hq enable <plugin_id> | disable <plugin_id>
 atlas-hq audit [--limit N]
 atlas-hq report <organization_id> [--actor ID]
+atlas-hq workplace list <organization_id> [--kind KIND]
+atlas-hq workplace workforce <workplace_id>
 ```
 
 Every subcommand hits the real registry or runtime — there is no command that
@@ -144,7 +159,5 @@ emits machine-readable registry state.
   and the upgrade path (e.g. the minimal `requires_core` matcher).
 - Core tables are owned by core alone; plugins never read or join them
   (`contract.md` §9, §22).
-- `atlas-bot/` is a read-only legacy archive. Do not open it, import from it,
-  or use it as a reference.
 
-Last updated: 2026-09-23
+Last updated: 2026-09-24

@@ -11,10 +11,12 @@ nothing else from the platform.
 | (the SDK's shared vocabulary, e.g. `atlas_sdk.reporting`) | another plugin's package — agree on the **id string**, not an import |
 | | core database tables, directly or via SQL |
 
-The one exception in the codebase is the admin app, not a plugin:
-`atlas_hq/cli.py::_run_report` imports `atlas_plugins.report_studio` for the
-single `report` command that must call a plugin's own API. Everything else in
-the CLI uses registry metadata alone.
+The admin app has two command-specific exceptions, both outside the plugin
+boundary: `atlas_hq report` and `atlas_hq workplace` use the kernel's private
+`_plugin_instance` lookup to call an enabled plugin's own administration surface.
+`report` imports Report Studio's request/capability vocabulary; `workplace`
+imports its plugin class and SDK vocabulary. This lookup is CLI-internal, not a
+plugin-facing API; plugins continue to use `atlas_sdk` only.
 
 The one-way dependency: `atlas_core` imports `atlas_sdk`; `atlas_plugins`
 imports `atlas_sdk`. Nothing in `atlas_sdk` imports either. A plugin developer

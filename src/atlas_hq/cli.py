@@ -11,6 +11,7 @@ import json
 import sys
 from collections.abc import Sequence
 
+from atlas_core.infrastructure.persistence.unit_of_work import create_sql_uow_factory
 from atlas_core.kernel import BootResult, Kernel
 
 INDENT = "  "
@@ -71,8 +72,14 @@ def build_parser() -> argparse.ArgumentParser:
 # --- boot ------------------------------------------------------------------
 
 
-def boot_kernel(args: argparse.Namespace) -> tuple[Kernel, BootResult]:
-    kernel = Kernel(entry_point_group=args.entry_point_group)
+def boot_kernel(
+    args: argparse.Namespace,
+    *,
+    with_persistence: bool = False,
+) -> tuple[Kernel, BootResult]:
+    """Boot registries, adding PostgreSQL only for database-backed commands."""
+    uow_factory = create_sql_uow_factory() if with_persistence else None
+    kernel = Kernel(uow_factory=uow_factory, entry_point_group=args.entry_point_group)
     result = kernel.boot()
     return kernel, result
 
@@ -200,7 +207,7 @@ def render_audit(kernel: Kernel, limit: int) -> str:
 def _audit_records(kernel: Kernel, limit: int) -> list:
     uow_factory = kernel.uow_factory
     if uow_factory is None:
-        return []
+        raise RuntimeError("audit requires a PostgreSQL-backed unit-of-work factory")
     from atlas_core.application.audit import AuditService
 
     return AuditService(uow_factory()).list_records(limit=limit)
@@ -254,7 +261,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if command == "workplace":
         return _run_workplace(args)
 
-    kernel, result = boot_kernel(args)
+    kernel, result = boot_kernel(
+        args,
+        with_persistence=command in {"audit", "enable", "disable"},
+    )
 
     if command == "plugins":
         out = "\n".join(render_plugins(kernel))
@@ -288,7 +298,7 @@ def _run_report(args: argparse.Namespace) -> int:
     from atlas_plugins.report_studio import REPORT_RENDER, ReportRequest
     from atlas_sdk import Scope
 
-    kernel, result = boot_kernel(args)
+    kernel, result = boot_kernel(args, with_persistence=True)
     kernel.enable_all()
 
     studio = _plugin_instance(kernel, "report_studio")
@@ -298,9 +308,9 @@ def _run_report(args: argparse.Namespace) -> int:
         )
         return 2
 
-    # The CLI acts as a platform administrator, granted the capability upfront.
+    # Grant only the report-renderer role in the requested organization scope.
     scope = Scope(organization_id=args.organization_id)
-    studio.context.authorization.grant(args.actor, "role.platform", scope)
+    studio.context.authorization.grant(args.actor, "role.report_renderer", scope)
 
     if not studio.context.authorization.check(REPORT_RENDER, scope, args.actor):
         print(  # noqa: T201
@@ -317,8 +327,9 @@ def _run_report(args: argparse.Namespace) -> int:
 def _plugin_instance(kernel: Kernel, plugin_id: str):
     """The live instance of an enabled plugin, or None.
 
-    The CLI reaches a plugin's own API only for the one command that must call
-    it (``report``). Everything else uses registry metadata alone.
+    The CLI reaches a plugin's own API only for the two administration commands
+    that must call it (``report`` and ``workplace``). Everything else uses
+    registry metadata alone.
     """
     instances = getattr(kernel, "_instances", {})
     return instances.get(plugin_id)
@@ -335,7 +346,7 @@ def _run_workplace(args: argparse.Namespace) -> int:
     )
     from atlas_sdk import Scope, WorkplaceType
 
-    kernel, result = boot_kernel(args)
+    kernel, result = boot_kernel(args, with_persistence=True)
     kernel.enable_all()
 
     plugin = _plugin_instance(kernel, "workplace_operations")

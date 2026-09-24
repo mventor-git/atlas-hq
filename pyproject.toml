@@ -4,8 +4,7 @@ version = "0.1.0"
 description = "Atlas-HQ — HR-centered modular plugin platform foundation"
 requires-python = ">=3.12"
 readme = "README.md"
-# ponytail: SQLite now; the URL is the only swap needed for Postgres later
-# (psycopg is deliberately absent until a server is actually reachable).
+# PostgreSQL is the only supported runtime and test database.
 dependencies = ["SQLAlchemy>=2.0", "psycopg[binary]>=3.2"]
 
 [project.optional-dependencies]

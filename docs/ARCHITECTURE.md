@@ -32,11 +32,13 @@ plugin, a module is not a contract. A module *provides* contract ids; a plugin
                                  │               │  (never the reverse)
 src/atlas_plugins                 │     src/atlas_core
   atlas_demo, atlas_demo_consumer │       domain          (entities, enums)
-  report_studio, workforce_summary│       application     (services + ports)
+  attendance_operations,          │       application     (services + ports)
   attendance_summary              │       infrastructure (persistence, events,
-                                  │                        discovery, registries)
-                                  │       kernel.py        (boot + lifecycle)
+  construction_reporting,         │                        discovery, registries)
+  report_studio, workforce_summary│       kernel.py        (boot + lifecycle)
+  workplace_operations            │
                                   └───────────────┘
+
 ```
 
 - The dependency direction is **one-way**: `atlas_core` imports `atlas_sdk`;
@@ -58,7 +60,7 @@ src/atlas_plugins                 │     src/atlas_core
 | `atlas_core/application` | application services | `people`, `organization`, `jobs`, `assignments`, `audit`, `authorization`, `scope`, `policy`, `workflow`, `notification`, `scheduling`, `unit_of_work`, `repositories` |
 | `atlas_core/infrastructure` | adapters | `persistence/` (orm, repositories, session, unit_of_work), `events/` (outbox + dispatcher), `discovery/` (entry points), `registry/` (in-memory registries + validation) |
 | `atlas_core/kernel.py` | boot + lifecycle | `Kernel`, `RegistryBundle`, `BootResult` |
-| `atlas_plugins` | shipped plugins | 5 plugins, each one directory, each registered by entry point |
+| `atlas_plugins` | shipped plugins | 8 plugins, each one directory, each registered by entry point |
 | `atlas_hq` | admin shell | `cli.py` — the `atlas-hq` command |
 
 ## How the kernel boots
@@ -88,8 +90,10 @@ Enable/disable (`Kernel.enable`, `Kernel.disable`, `Kernel.stop`,
 `Kernel.enable_all`) move a plugin through `INITIALIZED → ENABLED → RUNNING`
 and back. See [PLUGIN_SPEC.md](PLUGIN_SPEC.md) § lifecycle.
 
-The CLI mirrors this exactly: `atlas-hq boot|plugins|clusters|contracts|
-capabilities|events|enable|disable|audit|report` (`src/atlas_hq/cli.py`).
+The CLI mirrors this exactly: `atlas-hq [--entry-point-group GROUP] [--json]
+boot|plugins|clusters|contracts|capabilities|events|enable|disable|audit|report|workplace`
+(`src/atlas_hq/cli.py`). `workplace` has `list` and `workforce` subcommands;
+the persistence-backed commands use the configured PostgreSQL UoW.
 
 ## The transaction boundary — the platform commits, not the plugin
 
@@ -171,15 +175,25 @@ hierarchy. See [PLUGIN_SDK.md](PLUGIN_SDK.md).
 
 ## Persistence
 
-- PostgreSQL is the **contractual primary** (`contract.md` §3, §22).
-- The current adapter is **SQLite**: default URL `sqlite:///atlas.db`
-  (`infrastructure/persistence/session.py`). Reason: no Postgres server is
-  reachable on the development machine. The swap is one URL — set
-  `ATLAS_DATABASE_URL` to a `postgresql+psycopg://` URL; no core or application
-  code changes.
+- PostgreSQL is the only supported runtime and test database (`contract.md` §3, §22).
+- The local service is defined in `docker-compose.yml` and starts with
+  `docker compose up -d`.
+- Configure the runtime with:
+
+  ```text
+  ATLAS_DATABASE_URL=postgresql+psycopg://atlas:atlas@localhost:5433/atlas_hq
+  ATLAS_DATABASE_SCHEMA=atlas
+  ```
+
+  `ATLAS_DATABASE_SCHEMA` defaults to `atlas`.
+- Tests require `ATLAS_TEST_DATABASE_URL`; it may use the same local service or
+  a separately configured PostgreSQL database. Each test uses an isolated
+  PostgreSQL schema.
+- URLs must use `postgresql+psycopg`; there is no alternate database fallback or
+  substitute.
 - Core tables, owned by core alone, logical schema `atlas`: `employee`,
   `organization`, `workplace`, `job`, `assignment`, `audit`, `outbox`.
   `outbox` deliberately lives in the same schema as the business tables.
 - Plugins never touch these tables.
 
-Last updated: 2026-09-23
+Last updated: 2026-09-24

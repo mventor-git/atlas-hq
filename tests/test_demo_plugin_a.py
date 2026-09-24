@@ -1,7 +1,7 @@
 """Demo Plugin A against the real kernel — contract section 25's 14 checklist.
 
 Every item is exercised against the real entry-point-registered plugin and the
-real SQLite-backed services, not a mock. The plugin consumed here is the one
+real PostgreSQL-backed services, not a mock. The plugin consumed here is the one
 ``importlib.metadata`` discovers from this distribution's entry points.
 """
 
