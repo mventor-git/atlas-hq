@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, Self
 
+from atlas_sdk import PluginPersistencePort
+
 from .repositories import (
     AssignmentRepositoryPort,
     AuditRepositoryPort,
@@ -33,11 +35,10 @@ if TYPE_CHECKING:
 
 
 class SessionFactoryPort(Protocol):
-    """Sessions sharing this unit of work's transaction (contract section 22).
+    """Internal sessions sharing this unit of work's transaction (§22).
 
-    Plugins that own tables reach the *same* transaction the platform commits
-    through this port — never a connection of their own — so a plugin's state
-    change and the event it published commit together or not at all (§21).
+    Plugin code never receives this port; it receives the restricted
+    :class:`~atlas_sdk.PluginPersistencePort` adapter instead.
     """
 
     def __call__(self) -> Session:
@@ -55,7 +56,9 @@ class UnitOfWorkPort(Protocol):
     assignments: AssignmentRepositoryPort
     audit: AuditRepositoryPort
     outbox: OutboxRepositoryPort
-    #: Sessions sharing this transaction, for plugins that own tables (§22).
+    #: Restricted persistence shared by plugin-owned tables (§22).
+    persistence: PluginPersistencePort
+    #: Sessions sharing this transaction for internal adapters (§22).
     sessions: SessionFactoryPort
 
     def begin(self) -> None:
@@ -64,6 +67,9 @@ class UnitOfWorkPort(Protocol):
 
     def commit(self) -> None: ...
     def rollback(self) -> None: ...
+    def poison(self) -> None:
+        """Mark this cached unit of work unusable after rollback failure."""
+        ...
 
     def __enter__(self) -> Self: ...
     def __exit__(self, exc_type, exc, tb) -> None:

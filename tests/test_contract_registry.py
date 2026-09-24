@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from atlas_core.infrastructure.registry import InMemoryContractRegistry
+from atlas_core.infrastructure.registry import InMemoryContractRegistry, TransactionOwner
 from atlas_sdk import (
     ContractDeclaration,
     ContractId,
@@ -67,3 +67,55 @@ def test_unknown_contract_raises_not_found() -> None:
     with pytest.raises(NotFoundError):
         registry.get(ContractId("nope"))
     assert not registry.exists(ContractId("nope"))
+
+
+def test_contract_invocation_commits_exactly_once() -> None:
+    registry = InMemoryContractRegistry()
+    contract_id = ContractId("attendance.daily_summary")
+    registry.register(ContractDeclaration(contract_id=contract_id), "attendance")
+    registry.bind(contract_id, "attendance", _Handler())
+    commits = 0
+
+    def commit() -> None:
+        nonlocal commits
+        commits += 1
+
+    registry.register_transaction_owner(
+        "attendance",
+        TransactionOwner(commit=commit, rollback=lambda: None),
+    )
+
+    assert registry.invoke(contract_id, object()) == "handled"
+    assert commits == 1
+
+
+def test_contract_commit_failure_rolls_back_the_provider_transaction() -> None:
+    class FailingTransaction:
+        def __init__(self) -> None:
+            self.rollbacks = 0
+
+        def commit(self) -> None:
+            raise RuntimeError("commit exploded")
+
+        def rollback(self) -> None:
+            self.rollbacks += 1
+
+    transaction = FailingTransaction()
+    registry = InMemoryContractRegistry()
+    contract_id = ContractId("attendance.daily_summary")
+    registry.register(ContractDeclaration(contract_id=contract_id), "attendance")
+    registry.bind(contract_id, "attendance", _Handler())
+    registry.register_transaction_owner(
+        "attendance",
+        TransactionOwner(commit=transaction.commit, rollback=transaction.rollback),
+    )
+
+    with pytest.raises(RuntimeError, match="commit exploded"):
+        registry.invoke(contract_id, object())
+
+    assert transaction.rollbacks == 1
+
+
+class _Handler:
+    def handle(self, request: object) -> str:
+        return "handled"

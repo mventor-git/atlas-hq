@@ -25,7 +25,7 @@ plugin, a module is not a contract. A module *provides* contract ids; a plugin
 ```text
                     src/atlas_sdk  (ports, manifests, value types)
                   ┌──────────────────────────────────────────────┐
-                  │  PluginContext · 15 service Ports · 5        │
+                  │  PluginContext · context Ports · 5          │
                   │  registry Ports · error hierarchy            │
                   └──────────────▲───────────────▲───────────────┘
         plugins import only this  │               │ core implements every port
@@ -93,31 +93,49 @@ capabilities|events|enable|disable|audit|report` (`src/atlas_hq/cli.py`).
 
 ## The transaction boundary — the platform commits, not the plugin
 
-This is the single most important runtime rule. From `Kernel.context_for()`:
+This is the single most important runtime rule. The SDK exposes one small
+seam, `TransactionRunnerPort.run(operation)`, and `Kernel.context_for()` binds
+one context-owned adapter to each plugin's internal unit of work:
 
 ```python
-# The platform — not the plugin — owns the transaction (contract §21).
-self.registries.contracts.register_committer(plugin_id, uow.commit)
+uow = self._require_uow_factory()()
+transactions = SqlTransactionRunner(uow)
+owner = TransactionOwner(commit=uow.commit, rollback=uow.rollback)
+self.registries.contracts.register_transaction_owner(plugin_id, owner)
 ```
 
-And in `InMemoryContractRegistry._invoke_one()`:
+A direct plugin write uses the adapter:
 
 ```python
-result = instance.handle(request)  # plugin code runs
-...
-if commit is not None:
-    commit()  # the *platform* commits
+def record_attendance(self, request):
+    return self.context.transactions.run(lambda: self._service.record_attendance(request))
 ```
+
+The adapter begins the transaction, executes the operation, and commits only
+after a normal return. If begin, the operation, or commit raises, it rolls back
+and re-raises; a rollback failure is attached as a note to the original error
+and poisons the cached UoW so no later operation can commit. This is a deep
+Module: the plugin learns one operation-shaped method, while the core retains
+the unit-of-work implementation. Plugin-owned tables use the restricted
+`context.persistence` Adapter, never the raw session.
+
+A bound contract handler takes the other path: it calls its uncommitted
+internal implementation, and `InMemoryContractRegistry._invoke_one()` remains
+the outer transaction owner. A handler must not call
+`context.transactions.run`; that would nest the same platform transaction.
+The registry commits once after a normal handler return and rolls back when the
+handler or its commit fails. The explicit owner is registered only after
+initialization, subscription binding, and contract binding succeed; an
+`on_enable` failure unregisters it during cleanup. It is unregistered on disable
+and registered again on re-enable.
 
 Consequences:
 
-- A plugin **never** manages a transaction itself. It calls `context.*` ports
-  and returns; the platform commits the state change and any outbox event
-  together, or not at all.
-- A handler that raises is rolled back (`_rollback_safely(commit)` walks the
-  bound method to `uow.rollback`) — no half-applied state.
-- A **disabled** plugin has no committer and no binding, so its contracts are
-  genuinely uncallable (`invoke` raises `NotFoundError`).
+- A plugin **never** receives a commit, rollback, or unit-of-work lifecycle.
+- Direct writes, audit records, and outbox envelopes share one transaction;
+  a failed publication leaves none of them visible to a fresh transaction.
+- A **disabled** plugin has no transaction owner and no binding, so its
+  contracts are genuinely uncallable (`invoke` raises `NotFoundError`).
 
 See [EVENT_SPEC.md](EVENT_SPEC.md) for the outbox half of this guarantee.
 
@@ -145,7 +163,7 @@ another plugin's package, core ORM tables — is off-limits
 ([CORE_CONSTITUTION.md](CORE_CONSTITUTION.md) § 2, § 3).
 
 What the SDK exports (`src/atlas_sdk/__init__.py`): `Plugin`, `PluginManifest`,
-`ClusterManifest`, `ModuleDeclaration`, `PluginContext` + 15 service Ports,
+`ClusterManifest`, `ModuleDeclaration`, `PluginContext` + its published Ports,
 `Contract` / `ContractDeclaration` / `ContractId` / `ContractImplementation`,
 `DomainEvent` / `EventEnvelope` / `EventId`, `CapabilityId`, `Command` /
 `Query` (+ handlers), 5 registry Ports, the value types, and the full error

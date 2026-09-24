@@ -1,8 +1,10 @@
 """The plugin's real business services (contract section 27).
 
-Every service writes through ``context.sessions`` — the platform's transaction —
-so a state change and its outbox event commit together (contract section 21).
-The plugin never commits and never opens a connection of its own.
+Every service writes through ``context.persistence`` — the platform's
+transaction — so a state change and its outbox event share one transaction
+(contract section 21). The plugin's public compatibility wrappers supply the
+transaction runner; this implementation never commits and never opens a
+connection of its own.
 
 Gate J: workforce assignment validates the employee through the core's
 ``context.people`` before writing a membership row. The core still owns the
@@ -13,8 +15,6 @@ workforce membership.
 from __future__ import annotations
 
 from collections.abc import Callable
-
-from sqlalchemy.orm import Session
 
 from atlas_sdk import (
     AuthorizationError,
@@ -63,8 +63,7 @@ class WorkplaceOperationsService:
     # --- helpers -----------------------------------------------------------
 
     def _repo(self) -> WorkplaceOperationsRepository:
-        session: Session = self._context.sessions()
-        return WorkplaceOperationsRepository(session)
+        return WorkplaceOperationsRepository(self._context.persistence)
 
     def _require_capability(self, capability: CapabilityId, scope: Scope, actor: str) -> None:
         if not self._capability(capability, scope, actor):
@@ -81,17 +80,6 @@ class WorkplaceOperationsService:
             scope=scope,
             details=details,
         )
-
-    def _commit(self) -> None:
-        """Commit the platform transaction this service wrote through.
-
-        The registry invoker commits for contract calls; the plugin's own service
-        surface is called directly, so it commits the same unit of work itself.
-        Either way the state change and its outbox event land together or not at
-        all (contract section 21) — the plugin never commits anything but this
-        shared transaction.
-        """
-        self._context.unit_of_work.commit()
 
     def _to_workplace(self, row: WorkplaceORM) -> Workplace:
         return Workplace(
@@ -159,7 +147,6 @@ class WorkplaceOperationsService:
                 "actor_id": actor,
             },
         )
-        self._commit()
         return read_model
 
     # --- workforce ---------------------------------------------------------
@@ -240,15 +227,6 @@ class WorkplaceOperationsService:
             full_name=employee.full_name,
             employee_number=employee.employee_number,
         )
-        self._commit()
-        return WorkplaceMember(
-            membership_id=membership.membership_id,
-            workplace_id=workplace_id,
-            employee_id=employee_id,
-            organization_id=workplace.organization_id,
-            full_name=employee.full_name,
-            employee_number=employee.employee_number,
-        )
 
     def remove_workforce_member(
         self,
@@ -290,7 +268,6 @@ class WorkplaceOperationsService:
             "deleted": True,
         }
         self._publish(EventId("workplace.workforce.changed"), delete_payload)
-        self._commit()
 
     # --- queries -----------------------------------------------------------
 

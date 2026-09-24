@@ -243,3 +243,15 @@ def test_context_for_builds_a_plugin_context() -> None:
     assert context.people is not None
     assert context.events is not None
     assert context.contracts is wired.registries.contracts
+    assert context.transactions is wired.context_for("report.studio").transactions
+    assert not hasattr(context, "unit_of_work")
+
+
+def test_plugin_persistence_hides_transaction_lifecycle(kernel: Kernel) -> None:
+    context = kernel.context_for("report.studio")
+
+    assert not hasattr(context, "sessions")
+    persistence = context.persistence
+    assert not hasattr(persistence, "begin")
+    assert not hasattr(persistence, "commit")
+    assert not hasattr(persistence, "rollback")

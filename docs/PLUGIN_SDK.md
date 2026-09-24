@@ -27,14 +27,14 @@ needs to understand the SDK, not every core file.
 | Group | Names |
 |---|---|
 | Plugin | `Plugin`, `PluginLifecycle`, `PluginManifest`, `ClusterManifest`, `ModuleDeclaration` |
-| Context | `PluginContext` + the 15 service Ports below |
+| Context | `PluginContext` + the context Ports below |
 | Contracts | `Contract`, `ContractDeclaration`, `ContractId`, `ContractImplementation` |
 | Events | `DomainEvent`, `EventEnvelope`, `EventId` |
 | Capabilities | `CapabilityId` |
 | Command/Query | `Command`, `CommandHandler`, `Query`, `QueryHandler` |
 | Registries | `PluginRegistryPort`, `ClusterRegistryPort`, `CapabilityRegistryPort`, `ContractRegistryPort`, `EventRegistryPort` |
 | Value types | `Employee`, `Organization`, `Workplace`, `Job`, `Assignment`, `AuditEntry`, `WorkflowCase`, `Notification`, `ScheduledJob`, `Scope`, `WorkplaceType` |
-| Reporting vocabulary | `atlas_sdk.reporting`: `REPORT_DATASET_CONTRACT`, `REPORT_DATASET_DECLARATION`, `DatasetRequest`, `DatasetResponse` |
+| Reporting vocabulary | `atlas_sdk.reporting`: `REPORT_DATASET_CONTRACT`, `REPORT_DATASET_DECLARATION`, `DatasetRequest`, `DatasetResponse`, `REPORT_DEFINITION_CONTRACT`, `REPORT_DEFINITION_DECLARATION`, `ReportDefinitionRequest`, `ColumnFilter`, `ReportDefinition` |
 | Errors | see below |
 
 ## PluginContext — the one handle a plugin receives
@@ -60,13 +60,24 @@ class PluginContext:
     capabilities: CapabilityRegistryPort
     contracts: ContractRegistryPort
     events_registry: EventRegistryPort
+    persistence: PluginPersistencePort
+    transactions: TransactionRunnerPort
 ```
 
 One context per plugin, cached on the kernel (`Kernel.context_for`), so a
-plugin's stateful services share one unit of work and the platform's commit
-hook points at that same unit.
+plugin's stateful services share one platform-owned transaction. Plugin-owned
+tables use `context.persistence`, a restricted adapter exposing only `add`,
+`delete`, `get`, `query`, and `create_schema`; it never returns the raw session
+or transaction lifecycle. Direct reads and writes use
+`context.transactions.run(operation)`, which begins, commits on normal return,
+and rolls back on operation or commit failure; a rollback failure poisons the
+cached UoW so no later call can commit leaked state.
 
-### The 15 service Ports
+A bound contract handler is different: it calls its uncommitted internal
+implementation, while the contract registry remains the outer transaction
+owner. Never call `context.transactions.run` inside a bound handler.
+
+### The context ports
 
 | Port | Methods | Status |
 |---|---|---|
@@ -84,6 +95,8 @@ hook points at that same unit.
 | `EventPublisherPort` | `publish` | real, outbox-backed |
 | `EventDispatcherPort` | `subscribe`, `unsubscribe` | real, in-process |
 | `ContractInvokerPort` | `invoke`, `invoke_all` | real, registry-backed |
+| `PluginPersistencePort` | `add`, `delete`, `get`, `query`, `create_schema` | real, restricted |
+| `TransactionRunnerPort` | `run` | real, platform-owned direct-call seam |
 
 Ports are `Protocol`s owned by the SDK; `atlas_core` provides every
 implementation. "Skeleton" means callable today with a stable port but an
@@ -118,6 +131,8 @@ class Scope:
 `scope.narrow(requested, subject)` intersects what an operation wants with what
 an actor may see; the result never grants more than `subject`, and disjoint
 scopes yield an empty scope rather than an error.
+
+`AttendanceStatus` (`present`, `absent`, `on_leave`, `remote`, `other`) is published in `atlas_sdk.types` for the same reason: any plugin reads the attendance-status vocabulary without importing the plugin that owns attendance records.
 
 ## Capabilities and authorization
 
@@ -172,4 +187,4 @@ marker base classes with a `result_type` and a `CommandHandler` /
 and greppable (`contract.md` §20); plugins are not required to wrap every call
 in one — the ports are the primary surface.
 
-Last updated: 2026-09-23
+Last updated: 2026-09-24

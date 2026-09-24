@@ -87,11 +87,13 @@ contracts uncallable.
 | Returns | `object` — the single bound implementation's result | `list[object]` — every bound implementation's result |
 | No binding | raises `NotFoundError` | returns `[]` |
 | Order | first bound | registration order |
-| Use for | fixed plugins (`contract.md` §12) | **composable** plugins (`contract.md` §13) |
+| Use for | one known enabled implementation | zero or more possible providers, including requested-definition matching |
 
 `invoke` picks `bound[0]`. If several plugins bind the same contract id, `invoke`
-is ambiguous by design — prefer `invoke_all` when more than one provider may
-exist. Both commit through the provider's committer (see
+is ambiguous by design. A fixed plugin may own a known id, but a composable
+consumer that does not know its provider — including Report Studio matching
+`report.definition` — uses `invoke_all`. Both commit through the provider's
+transaction owner (see
 [ARCHITECTURE.md](ARCHITECTURE.md) § transaction boundary).
 
 ## Composable discovery — the Report Studio pattern
@@ -108,12 +110,23 @@ responses = self.context.invoker.invoke_all(
 datasets = [r for r in responses if isinstance(r, DatasetResponse)]
 ```
 
-The shared vocabulary lives in **the SDK**, not in a plugin:
-`atlas_sdk/reporting.py` exports `REPORT_DATASET_CONTRACT` (`"reporting.dataset"`),
-`REPORT_DATASET_DECLARATION`, `DatasetRequest`, `DatasetResponse`. Both
-`workforce_summary` and `attendance_summary` provide that contract; Report
-Studio composes both. Adding a third provider is an installation, not a code
-change. This is Gate O, acceptance-tested by `tests/test_report_studio.py`.
+The shared vocabulary lives in **the SDK**, not in a plugin.
+`atlas_sdk/reporting.py` exports `REPORT_DATASET_CONTRACT`
+(`"reporting.dataset"`), `REPORT_DATASET_DECLARATION`, `DatasetRequest`, and
+`DatasetResponse`. Both `workforce_summary` and `attendance_summary` provide that
+contract; Report Studio composes both. Adding a third provider is an
+installation, not a code change. This is Gate O, acceptance-tested by
+`tests/test_report_studio.py`.
+
+Fixed report definitions use the separate `REPORT_DEFINITION_CONTRACT`
+(`"report.definition"`) with `REPORT_DEFINITION_DECLARATION`,
+`ReportDefinitionRequest`, `ColumnFilter`, and `ReportDefinition`. A fixed plugin
+owns its domain-specific definition; Report Studio calls every enabled provider
+and selects the returned SDK `ReportDefinition` whose id matches the request. It
+never imports that plugin or hard-codes its definition. Disabling the provider
+unbinds the contract, so the definition becomes unavailable. Bound definition
+handlers are read-only and must not call `context.transactions.run`; Report
+Studio retains the transaction that commits its audit and outbox event.
 
 Discovery is deterministic and metadata-driven — the registry lookup plus the
 invoker. No table scanning, no field guessing (`contract.md` §14).
@@ -153,4 +166,4 @@ that makes the consumer's needs discoverable. Nothing currently rejects a
 consumer whose contract has no provider; `invoke` raises at runtime instead.
 Hard dependencies go in `requires_plugins`.
 
-Last updated: 2026-09-23
+Last updated: 2026-09-24

@@ -8,6 +8,7 @@ from .registries import (
     InMemoryContractRegistry,
     InMemoryEventRegistry,
     InMemoryPluginRegistry,
+    TransactionOwner,
 )
 from .validation import (
     CORE_VERSION,
@@ -25,6 +26,7 @@ __all__ = [
     "InMemoryContractRegistry",
     "InMemoryEventRegistry",
     "InMemoryPluginRegistry",
+    "TransactionOwner",
     "assert_dependencies",
     "assert_valid",
     "check_dependencies",

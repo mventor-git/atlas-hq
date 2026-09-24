@@ -12,11 +12,14 @@ guarantee observable rather than merely asserted.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Self
+from typing import Any, Protocol, Self, TypeVar
 
 from sqlalchemy.orm import Session
+
+from atlas_sdk import PluginPersistencePort, TransactionRunnerPort
 
 from ...application.unit_of_work import SessionFactoryPort, UnitOfWorkPort
 from .orm import Base
@@ -30,12 +33,83 @@ from .repositories import (
     WorkplaceRepository,
 )
 
+T = TypeVar("T")
+
+
+class _TransactionLifecycle(Protocol):
+    """The small internal lifecycle the transaction adapter needs."""
+
+    def begin(self) -> None: ...
+    def commit(self) -> None: ...
+    def rollback(self) -> None: ...
+    def poison(self) -> None: ...
+
+
+class PluginPersistenceAdapter(PluginPersistencePort):
+    """Restricts a SQLAlchemy session to plugin-owned persistence operations."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def add(self, entity: object) -> None:
+        self._session.add(entity)
+
+    def delete(self, entity: object) -> None:
+        self._session.delete(entity)
+
+    def get(self, entity_type: type[Any], entity_id: object) -> Any | None:
+        return self._session.get(entity_type, entity_id)
+
+    def query(self, statement: Any) -> Iterable[Any]:
+        return self._session.scalars(statement)
+
+    def create_schema(self, metadata: Any) -> None:
+        bind = self._session.bind
+        if bind is None:
+            return
+        engine = bind.engine if hasattr(bind, "engine") else bind
+        metadata.create_all(engine, checkfirst=True)
+
+
+def _rollback_preserving(uow: _TransactionLifecycle, error: BaseException) -> None:
+    try:
+        uow.rollback()
+    except BaseException as rollback_error:
+        error.add_note(f"transaction rollback failed: {rollback_error!r}")
+        try:
+            uow.poison()
+        except BaseException as poison_error:
+            error.add_note(f"transaction poison failed: {poison_error!r}")
+
+
+class SqlTransactionRunner(TransactionRunnerPort):
+    """Adapts the platform unit of work to the plugin transaction seam.
+
+    The adapter is the only place a direct plugin operation enters the
+    transaction. A normal return commits; an operation, begin, or commit failure
+    rolls back before the original exception is re-raised.
+    """
+
+    def __init__(self, uow: _TransactionLifecycle) -> None:
+        self._uow = uow
+
+    def run(self, operation: Callable[[], T]) -> T:
+        try:
+            self._uow.begin()
+            result = operation()
+            self._uow.commit()
+        except BaseException as error:
+            _rollback_preserving(self._uow, error)
+            raise
+        return result
+
 
 class SqlUnitOfWork(UnitOfWorkPort):
     """One SQLAlchemy transaction exposing every repository the core needs."""
 
     def __init__(self, session: Session) -> None:
         self._session = session
+        self._poisoned = False
         self.employees = EmployeeRepository(session)
         self.organizations = OrganizationRepository(session)
         self.workplaces = WorkplaceRepository(session)
@@ -43,8 +117,9 @@ class SqlUnitOfWork(UnitOfWorkPort):
         self.assignments = AssignmentRepository(session)
         self.audit = AuditRepository(session)
         self.outbox = OutboxRepository(session)
-        #: Plugins that own tables share this transaction through this callable
-        #: (contract section 22): one session, one commit, one rollback.
+        #: Plugins receive the restricted adapter, never this raw session.
+        self.persistence: PluginPersistencePort = PluginPersistenceAdapter(session)
+        #: The internal session factory remains available to core adapters.
         self.sessions: SessionFactoryPort = _SharedSessionFactory(session)
 
     @property
@@ -52,15 +127,27 @@ class SqlUnitOfWork(UnitOfWorkPort):
         """The live session. Test helpers reach in here; production code does not."""
         return self._session
 
+    def _ensure_usable(self) -> None:
+        if self._poisoned:
+            msg = "transaction is poisoned after rollback failure"
+            raise RuntimeError(msg)
+
     def begin(self) -> None:
+        self._ensure_usable()
         if not self._session.in_transaction():
             self._session.begin()
 
     def commit(self) -> None:
+        self._ensure_usable()
         self._session.commit()
 
     def rollback(self) -> None:
+        self._ensure_usable()
         self._session.rollback()
+
+    def poison(self) -> None:
+        """Make this cached UoW fail closed for every later transaction call."""
+        self._poisoned = True
 
     def __enter__(self) -> Self:
         self.begin()
@@ -72,10 +159,17 @@ class SqlUnitOfWork(UnitOfWorkPort):
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        if exc_type is not None:
-            self.rollback()
+        if exc_type is None:
+            try:
+                self.commit()
+            except BaseException as error:
+                _rollback_preserving(self, error)
+                raise
+            return
+        if exc is not None:
+            _rollback_preserving(self, exc)
         else:
-            self.commit()
+            self.rollback()
 
 
 def create_schema(session: Session) -> None:
@@ -86,11 +180,10 @@ def create_schema(session: Session) -> None:
 
 @dataclass(frozen=True)
 class _SharedSessionFactory:
-    """Returns the one session of the unit of work it belongs to.
+    """Internal session factory for core adapters sharing this unit of work.
 
-    A plugin calls ``context.sessions()`` to reach the transaction the platform
-    will commit for it; handing back the unit of work's own session is what
-    keeps a plugin's writes from escaping that transaction.
+    Plugin code receives :class:`PluginPersistenceAdapter` instead; this raw
+    session factory remains inside the core persistence seam.
     """
 
     session: Session
@@ -99,4 +192,9 @@ class _SharedSessionFactory:
         return self.session
 
 
-__all__ = ["SqlUnitOfWork", "create_schema"]
+__all__ = [
+    "PluginPersistenceAdapter",
+    "SqlTransactionRunner",
+    "SqlUnitOfWork",
+    "create_schema",
+]

@@ -11,10 +11,11 @@ Three rules this plugin establishes and obeys:
 1. **Plugin-owned tables.** ``wpop_workplace`` and ``wpop_workforce_membership``
    belong to this plugin alone (contract sections 9 and 22). Nothing else reads
    them; other plugins reach the domain through the contracts below.
-2. **The platform owns the transaction.** This plugin writes through
-   ``context.sessions``, the session of the unit of work the platform commits, so
-   a workplace change and its ``workplace.*`` event land in one transaction or
-   not at all (contract section 21). The plugin never commits.
+2. **The platform owns the transaction.** This plugin writes through the
+   restricted ``context.persistence`` adapter and its public compatibility
+   wrappers run direct operations through ``context.transactions``, so a
+   workplace change and its ``workplace.*`` event land in one transaction or not
+   at all (contract section 21). The plugin never manages the lifecycle.
 3. **The workforce contract is composable.** ``workplace.workforce`` is *also*
    published as a ``reporting.dataset`` provider, so Report Studio discovers it
    without a code change (contract sections 13 and 26). The contract is the
@@ -215,7 +216,7 @@ class WorkplaceOperationsPlugin(Plugin):
         self.context = context
         # The plugin owns its tables: create them from the plugin's own
         # metadata, in the plugin's own transaction (contract section 22).
-        WorkplaceOperationsRepository(context.sessions()).create_schema()
+        WorkplaceOperationsRepository(context.persistence).create_schema()
         self._service = WorkplaceOperationsService(context)
         # Publish the roles that carry this plugin's capabilities, so an
         # administrator can grant them (Gate M needs the grant to be possible).
@@ -252,27 +253,33 @@ class WorkplaceOperationsPlugin(Plugin):
     # --- the plugin's service surface -------------------------------------
 
     def create_workplace(self, request: WorkplaceRequest) -> Workplace:
-        return self._service.create_workplace(
-            organization_id=request.organization_id,
-            name=request.name,
-            code=request.code,
-            kind=request.kind,
-            parent_workplace_id=request.parent_workplace_id,
-            actor=request.actor_id,
+        return self.context.transactions.run(
+            lambda: self._service.create_workplace(
+                organization_id=request.organization_id,
+                name=request.name,
+                code=request.code,
+                kind=request.kind,
+                parent_workplace_id=request.parent_workplace_id,
+                actor=request.actor_id,
+            )
         )
 
     def add_workforce_member(self, request: WorkforceMembershipRequest) -> WorkplaceMember:
-        return self._service.add_workforce_member(
-            workplace_id=request.workplace_id,
-            employee_id=request.employee_id,
-            actor=request.actor_id,
+        return self.context.transactions.run(
+            lambda: self._service.add_workforce_member(
+                workplace_id=request.workplace_id,
+                employee_id=request.employee_id,
+                actor=request.actor_id,
+            )
         )
 
     def remove_workforce_member(self, request: WorkforceMembershipRequest) -> None:
-        self._service.remove_workforce_member(
-            workplace_id=request.workplace_id,
-            employee_id=request.employee_id,
-            actor=request.actor_id,
+        self.context.transactions.run(
+            lambda: self._service.remove_workforce_member(
+                workplace_id=request.workplace_id,
+                employee_id=request.employee_id,
+                actor=request.actor_id,
+            )
         )
 
     def list_workplaces(
@@ -280,13 +287,15 @@ class WorkplaceOperationsPlugin(Plugin):
         organization_id: str | None = None,
         kind: WorkplaceType | None = None,
     ) -> list[Workplace]:
-        return self._service.list_workplaces(organization_id, kind)
+        return self.context.transactions.run(
+            lambda: self._service.list_workplaces(organization_id, kind)
+        )
 
     def list_workforce(self, workplace_id: str) -> list[WorkplaceMember]:
-        return self._service.list_workforce(workplace_id)
+        return self.context.transactions.run(lambda: self._service.list_workforce(workplace_id))
 
     def resolve_context(self, workplace_id: str) -> WorkplaceContext:
-        return self._service.resolve_context(workplace_id)
+        return self.context.transactions.run(lambda: self._service.resolve_context(workplace_id))
 
 
 __all__ = [

@@ -9,6 +9,7 @@ public package — and never another plugin's.
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import cast
 
 import pytest
 
@@ -26,7 +27,9 @@ from atlas_plugins.workplace_operations import (
     WORKPLACE_WORKFORCE_CONTRACT,
     WorkforceMembershipRequest,
     WorkforceRequest,
+    WorkplaceContext,
     WorkplaceContextRequest,
+    WorkplaceMember,
     WorkplaceOperationsPlugin,
     WorkplaceRequest,
 )
@@ -186,6 +189,34 @@ def test_resolves_workplace_context(
     assert context.workforce_size == 1
 
 
+def test_direct_workplace_reads_run_through_the_platform_runner(
+    workplace_kernel: Kernel,
+    org_with_employee: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    org_id, employee_id = org_with_employee
+    _grant(workplace_kernel, MANAGER_ROLE, org_id)
+    workplace_id = _make_workplace(workplace_kernel, org_id)
+    _add_member(workplace_kernel, workplace_id, employee_id)
+    context = workplace_kernel.context_for("workplace_operations")
+    calls = 0
+    original_run = context.transactions.run
+
+    def tracked_run(operation: Callable[[], object]) -> object:
+        nonlocal calls
+        calls += 1
+        return original_run(operation)
+
+    monkeypatch.setattr(context.transactions, "run", tracked_run)
+
+    plugin = _plugin(workplace_kernel)
+    plugin.list_workplaces(organization_id=org_id)
+    plugin.list_workforce(workplace_id)
+    plugin.resolve_context(workplace_id)
+
+    assert calls == 3
+
+
 def test_removes_a_workforce_member(
     workplace_kernel: Kernel, org_with_employee: tuple[str, str]
 ) -> None:
@@ -216,9 +247,12 @@ def test_workforce_contract_answers_through_the_registry(
     workplace_id = _make_workplace(workplace_kernel, org_id)
     _add_member(workplace_kernel, workplace_id, employee_id)
 
-    members = workplace_kernel.registries.contracts.invoke(
-        WORKPLACE_WORKFORCE_CONTRACT,
-        WorkforceRequest(workplace_id=workplace_id, actor_id=ACTOR),
+    members = cast(
+        "list[WorkplaceMember]",
+        workplace_kernel.registries.contracts.invoke(
+            WORKPLACE_WORKFORCE_CONTRACT,
+            WorkforceRequest(workplace_id=workplace_id, actor_id=ACTOR),
+        ),
     )
 
     assert len(members) == 1
@@ -234,9 +268,12 @@ def test_context_contract_answers_through_the_registry(
     workplace_id = _make_workplace(workplace_kernel, org_id)
     _add_member(workplace_kernel, workplace_id, employee_id)
 
-    context = workplace_kernel.registries.contracts.invoke(
-        WORKPLACE_CONTEXT_CONTRACT,
-        WorkplaceContextRequest(workplace_id=workplace_id, actor_id=ACTOR),
+    context = cast(
+        "WorkplaceContext",
+        workplace_kernel.registries.contracts.invoke(
+            WORKPLACE_CONTEXT_CONTRACT,
+            WorkplaceContextRequest(workplace_id=workplace_id, actor_id=ACTOR),
+        ),
     )
 
     assert context.workplace_id == workplace_id

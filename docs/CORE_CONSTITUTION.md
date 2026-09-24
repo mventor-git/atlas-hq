@@ -60,17 +60,29 @@ See [EVENT_SPEC.md](EVENT_SPEC.md) § when-event-vs-query and
 
 ## Rule 5 — The platform owns the transaction
 
-A plugin never commits, rolls back, or opens a transaction. `Kernel.context_for()`
-registers `uow.commit` as the plugin's committer with the contract registry;
-`InMemoryContractRegistry._invoke_one()` commits after `handle()` returns and
-rolls back if it raises. Therefore a business state change and the event it
-published commit together or not at all (`contract.md` §21).
+A plugin never commits, rolls back, or opens a transaction. `PluginContext`
+exposes restricted `persistence` for plugin-owned tables and
+`transactions.run(operation)` for direct calls; neither exposes the raw session
+or lifecycle. The Kernel binds one transaction Adapter per context over the
+internal unit of work; it commits after a normal return and rolls back if begin,
+the operation, or commit raises. A rollback failure becomes a note on the
+original error and poisons the cached UoW, so later work fails closed.
+
+Bound contract handlers are the other path: they call uncommitted internal
+implementations, while the registry's explicit `TransactionOwner` remains the
+outer owner and commits once after `handle()` returns; it rolls back if the
+handler or its commit fails. The owner is registered only after initialization,
+subscription binding, and contract binding succeed; an `on_enable` failure
+unregisters it, disable removes it, and re-enable registers it again. A handler
+must not nest `transactions.run`. Therefore a business state change, its audit
+record, and the event it published commit together or not at all
+(`contract.md` §21).
 
 ## Rule 6 — The core is a service layer, not a utilities folder
 
 The core owns platform-wide truth and infrastructure and **exposes it through
 explicit ports**. A plugin holds one `PluginContext` and that is its entire
-reach into the core (`contract.md` §2). The 15 service Ports are listed in
+reach into the core (`contract.md` §2). The context Ports are listed in
 [PLUGIN_SDK.md](PLUGIN_SDK.md).
 
 ## Rule 7 — Validation preceds visibility

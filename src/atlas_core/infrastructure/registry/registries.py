@@ -13,7 +13,7 @@ silently overwriting another plugin's entry.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 from atlas_sdk import (
@@ -32,16 +32,25 @@ from atlas_sdk.manifest import ClusterManifest
 from ...domain.clusters import INITIAL_CLUSTERS
 
 
-def _rollback_safely(commit: Callable[[], None]) -> None:
-    """Roll back the unit of work behind a registered commit hook.
+@dataclass(frozen=True)
+class TransactionOwner:
+    """Explicit commit, rollback, and optional poison callbacks for a provider."""
 
-    A handler that raises must leave no half-applied state behind. The rollback
-    lives on the same unit of work as ``commit`` (``uow.rollback``), reached
-    through the bound method rather than a second registry entry.
-    """
-    rollback = getattr(getattr(commit, "__self__", None), "rollback", None)
-    if callable(rollback):
-        rollback()
+    commit: Callable[[], None]
+    rollback: Callable[[], None]
+    poison: Callable[[], None] | None = None
+
+
+def _rollback_preserving(owner: TransactionOwner, error: BaseException) -> None:
+    try:
+        owner.rollback()
+    except BaseException as rollback_error:
+        error.add_note(f"transaction rollback failed: {rollback_error!r}")
+        if owner.poison is not None:
+            try:
+                owner.poison()
+            except BaseException as poison_error:
+                error.add_note(f"transaction poison failed: {poison_error!r}")
 
 
 class InMemoryClusterRegistry:
@@ -195,11 +204,9 @@ class InMemoryContractRegistry:
     def __init__(self) -> None:
         self._declarations: list[ContractImplementation] = []
         self._bindings: dict[tuple[str, str], Any] = {}
-        #: plugin_id -> commit callback. The kernel supplies one per enabled
-        #: plugin; a contract invocation commits the provider's unit of work so
-        #: the state change and its outbox event land together (contract section 21).
-        #: A plugin that is not enabled has no entry, so its contracts cannot run.
-        self._committers: dict[str, Callable[[], None]] = {}
+        #: plugin_id -> explicit transaction owner. The kernel supplies one per
+        #: context and re-registers it when a disabled plugin is re-enabled.
+        self._transaction_owners: dict[str, TransactionOwner] = {}
 
     def register(self, declaration: ContractDeclaration, plugin_id: str) -> None:
         self._declarations.append(
@@ -241,8 +248,11 @@ class InMemoryContractRegistry:
 
     # --- runtime half ------------------------------------------------------
 
-    def register_committer(self, plugin_id: str, commit: Callable[[], None]) -> None:
-        self._committers[plugin_id] = commit
+    def register_transaction_owner(self, plugin_id: str, owner: TransactionOwner) -> None:
+        self._transaction_owners[plugin_id] = owner
+
+    def unregister_transaction_owner(self, plugin_id: str) -> None:
+        self._transaction_owners.pop(plugin_id, None)
 
     def bind(self, contract_id: ContractId, plugin_id: str, instance: object) -> None:
         key = (str(contract_id), plugin_id)
@@ -261,7 +271,7 @@ class InMemoryContractRegistry:
         self._bindings = {
             key: value for key, value in self._bindings.items() if key[1] != plugin_id
         }
-        self._committers.pop(plugin_id, None)
+        self.unregister_transaction_owner(plugin_id)
 
     def _bound(self, contract_id: ContractId) -> list[tuple[str, Any]]:
         return [
@@ -299,15 +309,20 @@ class InMemoryContractRegistry:
         change and the event it published commit together or not at all
         (contract section 21).
         """
-        commit = self._committers.get(plugin_id)
+        owner = self._transaction_owners.get(plugin_id)
+        if owner is None:
+            msg = f"plugin {plugin_id!r} has no transaction owner for its contract"
+            raise RuntimeError(msg)
         try:
             result = instance.handle(request)
-        except Exception:
-            if commit is not None:
-                _rollback_safely(commit)
+        except BaseException as error:
+            _rollback_preserving(owner, error)
             raise
-        if commit is not None:
-            commit()
+        try:
+            owner.commit()
+        except BaseException as error:
+            _rollback_preserving(owner, error)
+            raise
         return result
 
 
@@ -357,4 +372,5 @@ __all__ = [
     "InMemoryContractRegistry",
     "InMemoryEventRegistry",
     "InMemoryPluginRegistry",
+    "TransactionOwner",
 ]

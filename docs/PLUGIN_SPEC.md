@@ -100,12 +100,16 @@ imported.
 
 | | Fixed / domain-specific | Composable |
 |---|---|---|
-| Depends on | a known contract id | a declared capability/contract |
-| Example | a report that always calls `construction.daily_workforce` | Report Studio asking for every `reporting.dataset` |
-| Discovery | `invoker.invoke(id, req)` | `invoker.invoke_all(id, req)` |
+| Owns | a known domain definition or workflow | no provider implementation names |
+| Example | `construction_reporting` publishing `construction.daily_workforce` through `report.definition` | Report Studio asking every provider for `reporting.dataset` |
+| Consumer discovery | `invoker.invoke_all(report.definition, req)`, then match the requested id | `invoker.invoke_all(reporting.dataset, req)` |
 | Allowed? | **yes** (`contract.md` §12) | **required** (`contract.md` §13) |
 
-Both use the same manifest, same lifecycle, same entry-point registration.
+Both use the same manifest, lifecycle, entry-point registration, and SDK contract
+vocabulary. `construction_reporting` declares that its module supports
+`report.render` but leaves that authorization capability owned by Report Studio.
+Fixed ownership of domain meaning does not permit domain knowledge inside a
+composable consumer.
 
 ## How to write one — the minimum
 
@@ -179,4 +183,4 @@ and its `call_greeting` returning `object`). For shared *vocabulary* without
 shared implementation, the SDK holds the shapes — that is what
 `atlas_sdk/reporting.py` is for. See [CONTRACT_SPEC.md](CONTRACT_SPEC.md).
 
-Last updated: 2026-09-23
+Last updated: 2026-09-24

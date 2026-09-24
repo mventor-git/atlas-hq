@@ -11,10 +11,10 @@ core depends on the SDK's published language, never the reverse.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, Protocol, Self
+from typing import Any, Protocol, TypeVar
 
 from .capability import CapabilityId
 from .contract import ContractId
@@ -38,29 +38,28 @@ from .types import (
     WorkplaceType,
 )
 
+T = TypeVar("T")
 
-class SessionFactoryPort(Protocol):
-    """A factory of SQLAlchemy sessions sharing the plugin context's transaction.
 
-    Plugins that own persistence (contract section 22: a plugin's tables are its
-    own) need a session bound to the *same* unit of work the platform commits,
-    so a plugin's state change and its outbox event land in one transaction or
-    not at all (contract section 21). The plugin creates its tables and reads or
-    writes through sessions from this port; it never owns a transaction.
+class PluginPersistencePort(Protocol):
+    """Restricted persistence for a plugin-owned table set.
+
+    The adapter shares the platform transaction but exposes only the operations
+    first-party plugins need for their own tables. It never exposes the raw
+    session or any transaction lifecycle method.
     """
 
-    def __call__(self) -> Any:
-        """A session already sharing the plugin context's transaction."""
-        ...
+    def add(self, entity: object) -> None: ...
+    def delete(self, entity: object) -> None: ...
+    def get(self, entity_type: type[Any], entity_id: object) -> Any | None: ...
+    def query(self, statement: Any) -> Iterable[Any]: ...
+    def create_schema(self, metadata: Any) -> None: ...
 
 
-class UnitOfWorkPort(Protocol):
-    """A unit of work the plugin may begin, if the plugin needs its own one."""
+class TransactionRunnerPort(Protocol):
+    """Run one plugin operation inside the platform-owned transaction."""
 
-    def __enter__(self) -> Self: ...
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None: ...
-    def commit(self) -> None: ...
-    def rollback(self) -> None: ...
+    def run(self, operation: Callable[[], T]) -> T: ...
 
 
 class PeoplePort(Protocol):
@@ -296,13 +295,12 @@ class PluginContext:
     capabilities: CapabilityRegistryPort
     contracts: ContractRegistryPort
     events_registry: EventRegistryPort
-    #: Persistence the plugin may own (contract section 22). Sessions from this
-    #: factory share the platform's transaction for this plugin, so the plugin's
-    #: state changes commit with its outbox events — or not at all.
-    sessions: SessionFactoryPort
-    #: A unit of work the plugin may begin itself, for multi-step flows. The
-    #: platform commits the plugin's transaction; the plugin never commits.
-    unit_of_work: UnitOfWorkPort
+    #: Restricted persistence for the plugin's own tables. It shares the
+    #: platform transaction without exposing the raw session or its lifecycle.
+    persistence: PluginPersistencePort
+    #: The one transaction seam a plugin uses for a direct write. The platform
+    #: owns begin, commit, and rollback around the supplied operation.
+    transactions: TransactionRunnerPort
 
 
 __all__ = [
@@ -319,8 +317,8 @@ __all__ = [
     "PolicyPort",
     "SchedulingPort",
     "ScopePort",
-    "SessionFactoryPort",
-    "UnitOfWorkPort",
+    "PluginPersistencePort",
+    "TransactionRunnerPort",
     "WorkflowPort",
     "OrganizationPort",
 ]

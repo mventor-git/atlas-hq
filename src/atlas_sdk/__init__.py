@@ -20,11 +20,11 @@ from .context import (
     OrganizationPort,
     PeoplePort,
     PluginContext,
+    PluginPersistencePort,
     PolicyPort,
     SchedulingPort,
     ScopePort,
-    SessionFactoryPort,
-    UnitOfWorkPort,
+    TransactionRunnerPort,
     WorkflowPort,
 )
 from .contract import Contract, ContractDeclaration, ContractId, ContractImplementation
@@ -58,6 +58,7 @@ from .registry import (
 )
 from .types import (
     Assignment,
+    AttendanceStatus,
     AuditEntry,
     Employee,
     Job,
@@ -77,6 +78,7 @@ __all__ = [
     "Assignment",
     "AssignmentPort",
     "AtlasError",
+    "AttendanceStatus",
     "AuditEntry",
     "AuditPort",
     "AuthorizationError",
@@ -133,8 +135,8 @@ __all__ = [
     "Scope",
     "ScopeError",
     "ScopePort",
-    "SessionFactoryPort",
-    "UnitOfWorkPort",
+    "PluginPersistencePort",
+    "TransactionRunnerPort",
     "Workplace",
     "WorkplaceType",
     "WorkflowCase",

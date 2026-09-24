@@ -24,8 +24,10 @@ atlas-hq = "atlas_hq.cli:main"
 atlas_demo = "atlas_plugins.atlas_demo:AtlasDemoPlugin"
 atlas_demo_consumer = "atlas_plugins.atlas_demo_consumer:AtlasDemoConsumerPlugin"
 report_studio = "atlas_plugins.report_studio:ReportStudioPlugin"
+construction_reporting = "atlas_plugins.construction_reporting:ConstructionReportingPlugin"
 workforce_summary = "atlas_plugins.workforce_summary:WorkforceSummaryPlugin"
 attendance_summary = "atlas_plugins.attendance_summary:AttendanceSummaryPlugin"
+attendance_operations = "atlas_plugins.attendance_operations:AttendanceOperationsPlugin"
 workplace_operations = "atlas_plugins.workplace_operations:WorkplaceOperationsPlugin"
 
 [build-system]

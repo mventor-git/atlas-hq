@@ -8,6 +8,7 @@ section 18).
 
 from __future__ import annotations
 
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,7 @@ def _write_broken_init(directory: Path) -> None:
         f"        cluster_id={GOVERNANCE!r},\n"
         "    )\n"
         "    def initialize(self, context):\n"
+        "        context.audit.record(action='broken.init', actor='test')\n"
         "        raise RuntimeError('initialize exploded')\n",
         encoding="utf-8",
     )
@@ -51,6 +53,90 @@ def _write_broken_init(directory: Path) -> None:
     )
     (dist_info / "entry_points.txt").write_text(
         f"[{TEST_ENTRY_POINT_GROUP}]\nbroken-init = synthetic_broken_init:BrokenInitPlugin\n",
+        encoding="utf-8",
+    )
+
+
+def _write_broken_bind(directory: Path) -> None:
+    """A plugin whose subscription binding fails, in the test-only group."""
+    (directory / "synthetic_broken_bind.py").write_text(
+        "from atlas_sdk import ContractDeclaration, ContractId, Plugin, PluginManifest\n"
+        "class BrokenBindPlugin(Plugin):\n"
+        "    manifest = PluginManifest(\n"
+        "        plugin_id='broken.bind',\n"
+        "        name='Broken Bind',\n"
+        "        version='0.1.0',\n"
+        f"        cluster_id={GOVERNANCE!r},\n"
+        "        provides_contracts=(ContractDeclaration(contract_id=ContractId('broken.bind'),"
+        " version='1.0'),),\n"
+        "    )\n"
+        "    def bind_subscriptions(self):\n"
+        "        raise RuntimeError('subscription exploded')\n",
+        encoding="utf-8",
+    )
+    dist_info = directory / "broken-bind-0.1.0.dist-info"
+    dist_info.mkdir(exist_ok=True)
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: broken-bind\nVersion: 0.1.0\n",
+        encoding="utf-8",
+    )
+    (dist_info / "entry_points.txt").write_text(
+        f"[{TEST_ENTRY_POINT_GROUP}]\nbroken-bind = synthetic_broken_bind:BrokenBindPlugin\n",
+        encoding="utf-8",
+    )
+
+
+def _write_cancelled_plugin(directory: Path, *, plugin_id: str, phase: str) -> None:
+    """A plugin whose selected enable hook raises a BaseException."""
+    module_name = f"synthetic_{plugin_id.replace('.', '_')}"
+    contract_id = f"{plugin_id}.contract"
+    init_body = (
+        "        self.context = context\n"
+        "        self.context.audit.record(action='cancel.initialize', actor='test')\n"
+        "        raise Cancelled('initialize cancelled')\n"
+        if phase == "initialize"
+        else "        self.context = context\n"
+    )
+    enable_body = (
+        "        self.context.audit.record(action='cancel.enable', actor='test')\n"
+        "        raise Cancelled('on_enable cancelled')\n"
+        if phase == "on_enable"
+        else "        return None\n"
+    )
+    source = (
+        "from atlas_sdk import ContractDeclaration, ContractId, Plugin, PluginManifest\n"
+        "class Cancelled(BaseException):\n"
+        "    pass\n"
+        "class CancelledPlugin(Plugin):\n"
+        "    manifest = PluginManifest(\n"
+        f"        plugin_id={plugin_id!r},\n"
+        f"        name='Cancelled Plugin',\n"
+        "        version='0.1.0',\n"
+        f"        cluster_id={GOVERNANCE!r},\n"
+        f"        provides_contracts=(ContractDeclaration(contract_id=ContractId({contract_id!r}),"
+        " version='1.0'),),\n"
+        "    )\n"
+        "    def initialize(self, context):\n"
+        f"{init_body}"
+        "    def bind_contracts(self):\n"
+        f"        self.context.contracts.bind(ContractId({contract_id!r}),"
+        " self.manifest.plugin_id, _Handler())\n"
+        "    def on_enable(self):\n"
+        f"{enable_body}"
+        "class _Handler:\n"
+        "    def handle(self, request):\n"
+        "        return request\n"
+    )
+    (directory / f"{module_name}.py").write_text(textwrap.dedent(source), encoding="utf-8")
+    dist_name = f"cancelled-{phase}"
+    dist_info = directory / f"{dist_name}-0.1.0.dist-info"
+    dist_info.mkdir(exist_ok=True)
+    (dist_info / "METADATA").write_text(
+        f"Metadata-Version: 2.1\nName: {dist_name}\nVersion: 0.1.0\n",
+        encoding="utf-8",
+    )
+    (dist_info / "entry_points.txt").write_text(
+        f"[{TEST_ENTRY_POINT_GROUP}]\n{plugin_id} = {module_name}:CancelledPlugin\n",
         encoding="utf-8",
     )
 
@@ -152,6 +238,92 @@ def test_a_plugin_that_fails_initialize_is_marked_failed_and_isolated(
     assert "initialize exploded" in str(excinfo.value)
     assert kernel.registries.plugins.lifecycle_state("broken.init") is PluginLifecycle.FAILED
     assert "broken.init" not in kernel._instances
+    assert not any(
+        record.action == "broken.init"
+        for record in kernel.context_for("broken.init").audit.list_records()
+    )
+
+
+def test_failed_subscription_binding_unregisters_the_transaction_owner(
+    kernel: Kernel,
+    isolated_plugins: Path,
+) -> None:
+    _write_broken_bind(isolated_plugins)
+    refresh_metadata_cache()
+    kernel.boot()
+
+    with pytest.raises(PluginLifecycleError, match="subscription exploded"):
+        kernel.enable("broken.bind")
+
+    class Handler:
+        def handle(self, request: object) -> str:
+            return "unexpected"
+
+    contract_id = ContractId("broken.bind")
+    kernel.registries.contracts.bind(contract_id, "broken.bind", Handler())
+    with pytest.raises(RuntimeError, match="no transaction owner"):
+        kernel.registries.contracts.invoke(contract_id, object())
+
+
+def test_base_exception_during_initialize_cleans_state_and_owner(
+    kernel: Kernel,
+    isolated_plugins: Path,
+) -> None:
+    _write_cancelled_plugin(
+        isolated_plugins,
+        plugin_id="cancel.initialize",
+        phase="initialize",
+    )
+    refresh_metadata_cache()
+    kernel.boot()
+
+    with pytest.raises(BaseException, match="initialize cancelled") as caught:
+        kernel.enable("cancel.initialize")
+
+    assert type(caught.value).__name__ == "Cancelled"
+    assert kernel.registries.plugins.lifecycle_state("cancel.initialize") is PluginLifecycle.FAILED
+    context = kernel.context_for("cancel.initialize")
+    assert not any(record.action == "cancel.initialize" for record in context.audit.list_records())
+
+    class Handler:
+        def handle(self, request: object) -> object:
+            return request
+
+    contract_id = ContractId("cancel.initialize.contract")
+    kernel.registries.contracts.bind(contract_id, "cancel.initialize", Handler())
+    with pytest.raises(RuntimeError, match="no transaction owner"):
+        kernel.registries.contracts.invoke(contract_id, object())
+
+
+def test_base_exception_during_on_enable_cleans_state_and_owner(
+    kernel: Kernel,
+    isolated_plugins: Path,
+) -> None:
+    _write_cancelled_plugin(
+        isolated_plugins,
+        plugin_id="cancel.on_enable",
+        phase="on_enable",
+    )
+    refresh_metadata_cache()
+    kernel.boot()
+
+    with pytest.raises(BaseException, match="on_enable cancelled") as caught:
+        kernel.enable("cancel.on_enable")
+
+    assert type(caught.value).__name__ == "Cancelled"
+    assert kernel.registries.plugins.lifecycle_state("cancel.on_enable") is PluginLifecycle.FAILED
+    context = kernel.context_for("cancel.on_enable")
+    assert not any(record.action == "cancel.enable" for record in context.audit.list_records())
+    assert not kernel.registries.contracts.get(ContractId("cancel.on_enable.contract")).is_bound
+
+    class Handler:
+        def handle(self, request: object) -> object:
+            return request
+
+    contract_id = ContractId("cancel.on_enable.contract")
+    kernel.registries.contracts.bind(contract_id, "cancel.on_enable", Handler())
+    with pytest.raises(RuntimeError, match="no transaction owner"):
+        kernel.registries.contracts.invoke(contract_id, object())
 
 
 def test_a_failing_plugin_does_not_stop_the_others(

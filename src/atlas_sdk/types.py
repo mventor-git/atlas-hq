@@ -32,6 +32,22 @@ class WorkplaceType(StrEnum):
     OTHER = "other"
 
 
+class AttendanceStatus(StrEnum):
+    """The status of one employee's attendance at one workplace on one date.
+
+    Attendance Operations owns attendance records (contract section 10) but the
+    *vocabulary* is published here so every other plugin — payroll, leave,
+    Report Studio — reads the same values without importing that plugin, exactly
+    as ``WorkplaceType`` is published.
+    """
+
+    PRESENT = "present"
+    ABSENT = "absent"
+    ON_LEAVE = "on_leave"
+    REMOTE = "remote"
+    OTHER = "other"
+
+
 @dataclass(frozen=True)
 class Scope:
     """The context in which an operation or record lives (contract section 35).

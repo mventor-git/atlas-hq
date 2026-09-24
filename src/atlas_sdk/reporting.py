@@ -1,13 +1,9 @@
-"""The published shape of the ``reporting.dataset`` contract (contract §13).
+"""Published reporting contract vocabulary (contract §§12, 13 and 28).
 
-Composability needs a shared *vocabulary*, not shared implementations. Report
-Studio and every dataset-providing plugin import these types from the SDK; no
-plugin imports another plugin. That is what keeps Report Studio able to consume
-datasets from plugins it has never heard of.
-
-The vocabulary is intentionally tiny: a request scoped by organization and a
-response that is just labelled columns and rows. Anything richer would start to
-encode business meaning the consumer has no right to assume.
+Composability needs shared *shapes*, not shared implementations. Report Studio,
+dataset providers, and fixed definition plugins import these types from the SDK;
+no plugin imports another plugin. Dataset rows stay labelled columns and values,
+while report definitions describe generic column filters, grouping, and details.
 """
 
 from __future__ import annotations
@@ -41,6 +37,70 @@ REPORT_DATASET_DECLARATION = ContractDeclaration(
     description="A labelled tabular dataset for one organization.",
 )
 
+REPORT_DEFINITION_CONTRACT = ContractId("report.definition")
+
+REPORT_DEFINITION_DECLARATION = ContractDeclaration(
+    contract_id=REPORT_DEFINITION_CONTRACT,
+    version="1.0",
+    schema={
+        "request": {
+            "type": "object",
+            "properties": {"definition_id": {"type": "string"}},
+            "required": ["definition_id"],
+        },
+        "response": {
+            "type": "object",
+            "properties": {
+                "definition_id": {"type": "string"},
+                "title": {"type": "string"},
+                "dataset_ids": {"type": "array", "items": {"type": "string"}},
+                "filters": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "column": {"type": "string"},
+                            "value": {"type": "string"},
+                        },
+                        "required": ["column", "value"],
+                    },
+                },
+                "group_by": {"type": "array", "items": {"type": "string"}},
+                "detail_columns": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["definition_id", "title", "dataset_ids"],
+        },
+    },
+    description="A named, provider-owned declarative shape over logical datasets.",
+)
+
+
+@dataclass(frozen=True)
+class ReportDefinitionRequest:
+    """Ask enabled fixed-report plugins for one logical report definition."""
+
+    definition_id: str
+
+
+@dataclass(frozen=True)
+class ColumnFilter:
+    """Keep only rows whose named column equals the supplied value."""
+
+    column: str
+    value: str
+
+
+@dataclass(frozen=True)
+class ReportDefinition:
+    """A named, generic tabular shape over one or more logical dataset ids."""
+
+    definition_id: str
+    title: str
+    dataset_ids: tuple[str, ...]
+    filters: tuple[ColumnFilter, ...] = ()
+    group_by: tuple[str, ...] = ()
+    detail_columns: tuple[str, ...] = ()
+
 
 @dataclass(frozen=True)
 class DatasetRequest:
@@ -70,6 +130,11 @@ class DatasetResponse:
 __all__ = [
     "REPORT_DATASET_CONTRACT",
     "REPORT_DATASET_DECLARATION",
+    "REPORT_DEFINITION_CONTRACT",
+    "REPORT_DEFINITION_DECLARATION",
+    "ColumnFilter",
     "DatasetRequest",
     "DatasetResponse",
+    "ReportDefinition",
+    "ReportDefinitionRequest",
 ]

@@ -8,6 +8,7 @@ real SQLite-backed services, not a mock. The plugin consumed here is the one
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import cast
 
 import pytest
 
@@ -22,6 +23,7 @@ from atlas_plugins.atlas_demo import (
     DEMO_GREETING_CONTRACT,
     AtlasDemoPlugin,
     GreetingRequest,
+    GreetingResponse,
 )
 from atlas_sdk import AuthorizationError, PluginLifecycle
 
@@ -82,9 +84,12 @@ def test_the_plugin_consumes_a_real_core_service(
     org_id, employee_id = org_with_employee
     _grant(demo, org_id)
 
-    response = demo.registries.contracts.invoke(
-        DEMO_GREETING_CONTRACT,
-        GreetingRequest(employee_id=employee_id, actor_id=ACTOR, organization_id=org_id),
+    response = cast(
+        "GreetingResponse",
+        demo.registries.contracts.invoke(
+            DEMO_GREETING_CONTRACT,
+            GreetingRequest(employee_id=employee_id, actor_id=ACTOR, organization_id=org_id),
+        ),
     )
 
     assert response.greeting == "Hello, Ada Lovelace!"
@@ -99,7 +104,9 @@ def test_the_plugin_provides_a_typed_contract(demo: Kernel) -> None:
     assert impl.plugin_id == "atlas_demo"
     assert impl.declaration.version == "1.0"
     assert impl.declaration.schema["type"] == "object"
-    assert "employee_id" in impl.declaration.schema["required"]
+    required = impl.declaration.schema.get("required")
+    assert isinstance(required, list)
+    assert "employee_id" in required
     assert impl.is_bound  # the plugin is enabled, so the contract is callable
 
 
@@ -145,6 +152,40 @@ def test_the_plugin_can_be_enabled_and_disabled(demo: Kernel) -> None:
     assert not demo.registries.contracts.get(DEMO_GREETING_CONTRACT).is_bound
 
 
+def test_disable_reenable_rebinds_the_contract_transaction_owner(
+    demo: Kernel,
+    org_with_employee: tuple[str, str],
+    uow_factory: Callable[[], UnitOfWorkPort],
+) -> None:
+    org_id, employee_id = org_with_employee
+    _grant(demo, org_id)
+    first = cast(
+        "GreetingResponse",
+        demo.registries.contracts.invoke(
+            DEMO_GREETING_CONTRACT,
+            GreetingRequest(employee_id=employee_id, actor_id=ACTOR, organization_id=org_id),
+        ),
+    )
+
+    demo.disable("atlas_demo")
+    demo.enable("atlas_demo")
+    second = cast(
+        "GreetingResponse",
+        demo.registries.contracts.invoke(
+            DEMO_GREETING_CONTRACT,
+            GreetingRequest(employee_id=employee_id, actor_id=ACTOR, organization_id=org_id),
+        ),
+    )
+
+    with uow_factory() as uow:
+        records = list(uow.audit.all(organization_id=org_id, limit=20))
+        envelopes = list(uow.outbox.pending(limit=20))
+
+    assert first.audit_id in {record.audit_id for record in records}
+    assert second.audit_id in {record.audit_id for record in records}
+    assert any(envelope.event.payload.get("audit_id") == second.audit_id for envelope in envelopes)
+
+
 # 11. appear in Atlas-HQ
 
 
@@ -170,9 +211,12 @@ def test_the_plugin_writes_an_audit_record(
     org_id, employee_id = org_with_employee
     _grant(demo, org_id)
 
-    response = demo.registries.contracts.invoke(
-        DEMO_GREETING_CONTRACT,
-        GreetingRequest(employee_id=employee_id, actor_id=ACTOR, organization_id=org_id),
+    response = cast(
+        "GreetingResponse",
+        demo.registries.contracts.invoke(
+            DEMO_GREETING_CONTRACT,
+            GreetingRequest(employee_id=employee_id, actor_id=ACTOR, organization_id=org_id),
+        ),
     )
 
     from atlas_core.application.audit import AuditService

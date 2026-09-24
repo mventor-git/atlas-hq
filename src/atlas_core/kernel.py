@@ -44,12 +44,14 @@ from .application.workflow import WorkflowService
 from .domain.clusters import INITIAL_CLUSTERS
 from .infrastructure.discovery import PLUGIN_ENTRY_POINT_GROUP, DiscoveredPlugin, discover_plugins
 from .infrastructure.events import EventDispatcher, EventSubscriber, OutboxEventPublisher
+from .infrastructure.persistence.unit_of_work import SqlTransactionRunner
 from .infrastructure.registry import (
     InMemoryCapabilityRegistry,
     InMemoryClusterRegistry,
     InMemoryContractRegistry,
     InMemoryEventRegistry,
     InMemoryPluginRegistry,
+    TransactionOwner,
     assert_dependencies,
     assert_valid,
 )
@@ -103,6 +105,9 @@ class Kernel:
         #: plugin_id -> its context. One context per plugin so a plugin's
         #: stateful services share one unit of work (see context_for).
         self._contexts: dict[str, PluginContext] = {}
+        #: plugin_id -> explicit contract transaction owner. The owner is cached
+        #: with the context and re-registered when a disabled plugin re-enables.
+        self._transaction_owners: dict[str, TransactionOwner] = {}
         #: Shared, stateful services. A plugin registers a role at initialize and
         #: a later context must see it, so these live on the kernel, not per call.
         self._authorization = AuthorizationService()
@@ -122,18 +127,24 @@ class Kernel:
         events and calls their contracts — never their modules.
 
         One context per plugin, cached: a plugin's stateful services (grants it
-        registers, the audit trail it writes) must all share one unit of work,
-        and the platform's commit hook must point at that same unit of work.
+        registers, the audit trail it writes) must all share one platform-owned
+        transaction, and both direct calls and contract invocations use that same
+        transaction.
         """
         cached = self._contexts.get(plugin_id)
         if cached is not None:
             return cached
         uow = self._require_uow_factory()()
+        transactions = SqlTransactionRunner(uow)
+        # Cache the owner with the context; publish it only after enable
+        # prerequisites succeed.
+        owner = TransactionOwner(
+            commit=uow.commit,
+            rollback=uow.rollback,
+            poison=uow.poison,
+        )
+        self._transaction_owners[plugin_id] = owner
         publisher = OutboxEventPublisher(uow, publisher=plugin_id)
-        # The platform — not the plugin — owns the transaction (contract §21).
-        # Register the commit hook so a contract invocation commits the plugin's
-        # state change and its outbox events atomically, or not at all.
-        self.registries.contracts.register_committer(plugin_id, uow.commit)
         context = PluginContext(
             plugin_id=plugin_id,
             people=PeopleService(uow, publisher),
@@ -153,15 +164,10 @@ class Kernel:
             capabilities=self.registries.capabilities,
             contracts=self.registries.contracts,
             events_registry=self.registries.events,
-            sessions=uow.sessions,
-            unit_of_work=uow,
+            persistence=uow.persistence,
+            transactions=transactions,
         )
         self._contexts[plugin_id] = context
-        # The platform owns the transaction (contract section 21). A plugin's
-        # own service surface is called directly, not through the registry
-        # invoker, so it needs the same commit hook the invoker uses —
-        # otherwise its state change and its outbox event escape the transaction.
-        self.registries.contracts.register_committer(plugin_id, context.unit_of_work.commit)
         return context
 
     # --- boot -------------------------------------------------------------
@@ -199,9 +205,15 @@ class Kernel:
         instance = candidate.instance
         try:
             instance.initialize(self.context_for(plugin_id))
-        except Exception as exc:  # noqa: BLE001 - the plugin's hook is arbitrary
+        except BaseException as exc:  # noqa: BLE001 - plugin hooks may be cancelled
+            self.registries.contracts.unregister_transaction_owner(plugin_id)
+            self._rollback_cached_context(plugin_id, exc)
             self._mark_failed(plugin_id, exc)
-            raise PluginLifecycleError(f"plugin {plugin_id!r} failed to initialize: {exc}") from exc
+            if isinstance(exc, Exception):
+                raise PluginLifecycleError(
+                    f"plugin {plugin_id!r} failed to initialize: {exc}"
+                ) from exc
+            raise
         self._instances[plugin_id] = instance
         self.registries.plugins.mark(plugin_id, PluginLifecycle.INITIALIZED)
 
@@ -217,29 +229,44 @@ class Kernel:
         if instance is None:
             self.initialize(plugin_id)
             instance = self._instances[plugin_id]
-
-        subscriptions = instance.bind_subscriptions()
-        for event_id, subscriber in subscriptions.items():
-            self.dispatcher.subscribe(event_id, subscriber)
+        subscriptions: Mapping[EventId, EventSubscriber] = {}
+        try:
+            subscriptions = instance.bind_subscriptions()
+            for event_id, subscriber in subscriptions.items():
+                self.dispatcher.subscribe(event_id, subscriber)
+        except BaseException as exc:  # noqa: BLE001 - plugin hooks may be cancelled
+            self._cleanup_enable(plugin_id, subscriptions, exc)
+            self._mark_failed(plugin_id, exc)
+            if isinstance(exc, Exception):
+                raise PluginLifecycleError(
+                    f"plugin {plugin_id!r} failed while subscribing: {exc}"
+                ) from exc
+            raise
 
         try:
             instance.bind_contracts()
-        except Exception as exc:  # noqa: BLE001 - binding is plugin code
-            for event_id, subscriber in subscriptions.items():
-                self.dispatcher.unsubscribe(event_id, subscriber)
+        except BaseException as exc:  # noqa: BLE001 - plugin hooks may be cancelled
+            self._cleanup_enable(plugin_id, subscriptions, exc)
             self._mark_failed(plugin_id, exc)
-            raise PluginLifecycleError(
-                f"plugin {plugin_id!r} failed to bind its contracts: {exc}"
-            ) from exc
+            if isinstance(exc, Exception):
+                raise PluginLifecycleError(
+                    f"plugin {plugin_id!r} failed to bind its contracts: {exc}"
+                ) from exc
+            raise
 
+        # Publish the owner only after initialization, subscriptions, and
+        # contract binding have succeeded. on_enable may use bound contracts.
         try:
+            self._register_transaction_owner(plugin_id)
             instance.on_enable()
-        except Exception as exc:  # noqa: BLE001 - on_enable is plugin code
-            self._tear_down(plugin_id, subscriptions)
+        except BaseException as exc:  # noqa: BLE001 - plugin hooks may be cancelled
+            self._cleanup_enable(plugin_id, subscriptions, exc)
             self._mark_failed(plugin_id, exc)
-            raise PluginLifecycleError(
-                f"plugin {plugin_id!r} failed while enabling: {exc}"
-            ) from exc
+            if isinstance(exc, Exception):
+                raise PluginLifecycleError(
+                    f"plugin {plugin_id!r} failed while enabling: {exc}"
+                ) from exc
+            raise
 
         self.registries.plugins.mark(plugin_id, PluginLifecycle.ENABLED)
 
@@ -263,6 +290,8 @@ class Kernel:
             PluginLifecycle.RUNNING,
         ):
             self.disable(plugin_id)
+        else:
+            self.registries.contracts.unbind(plugin_id)
         instance = self._instances.pop(plugin_id, None)
         if instance is not None:
             instance.shutdown()
@@ -284,6 +313,44 @@ class Kernel:
 
     def failed_plugins(self) -> list[tuple[str, str]]:
         return list(self.boot_result.failed)
+
+    def _register_transaction_owner(self, plugin_id: str) -> None:
+        owner = self._transaction_owners.get(plugin_id)
+        if owner is None:
+            self.context_for(plugin_id)
+            owner = self._transaction_owners[plugin_id]
+        self.registries.contracts.register_transaction_owner(plugin_id, owner)
+
+    def _cleanup_enable(
+        self,
+        plugin_id: str,
+        subscriptions: Mapping[EventId, EventSubscriber],
+        error: BaseException,
+    ) -> None:
+        try:
+            self.registries.contracts.unbind(plugin_id)
+        except BaseException as cleanup_error:
+            error.add_note(f"contract cleanup failed: {cleanup_error!r}")
+        for event_id, subscriber in subscriptions.items():
+            try:
+                self.dispatcher.unsubscribe(event_id, subscriber)
+            except BaseException as cleanup_error:
+                error.add_note(f"subscription cleanup failed: {cleanup_error!r}")
+        self._rollback_cached_context(plugin_id, error)
+
+    def _rollback_cached_context(self, plugin_id: str, error: BaseException) -> None:
+        owner = self._transaction_owners.get(plugin_id)
+        if owner is None:
+            return
+        try:
+            owner.rollback()
+        except BaseException as rollback_error:
+            error.add_note(f"enable cleanup rollback failed: {rollback_error!r}")
+            if owner.poison is not None:
+                try:
+                    owner.poison()
+                except BaseException as poison_error:
+                    error.add_note(f"transaction poison failed: {poison_error!r}")
 
     def _tear_down(self, plugin_id: str, subscriptions: Mapping[EventId, EventSubscriber]) -> None:
         self.registries.contracts.unbind(plugin_id)
