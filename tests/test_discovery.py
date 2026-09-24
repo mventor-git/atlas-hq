@@ -57,6 +57,64 @@ def test_discovers_an_installed_distribution(
     assert "report.generated" in manifest.publishes_events
 
 
+def test_identical_distribution_metadata_is_discovered_once(isolated_plugins: Path) -> None:
+    write_distribution(
+        isolated_plugins,
+        distribution_name="synthetic-report-studio",
+        module_name="synthetic_report_studio",
+        class_name="ReportStudioPlugin",
+        plugin_id="report.studio",
+    )
+    duplicate_info = isolated_plugins / "synthetic-report-studio-copy-0.1.0.dist-info"
+    duplicate_info.mkdir()
+    (duplicate_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: synthetic-report-studio\nVersion: 0.1.0\n",
+        encoding="utf-8",
+    )
+    (duplicate_info / "entry_points.txt").write_text(
+        f"[{TEST_ENTRY_POINT_GROUP}]\nreport.studio = synthetic_report_studio:ReportStudioPlugin\n",
+        encoding="utf-8",
+    )
+    refresh_metadata_cache()
+
+    found = discover_plugins(TEST_ENTRY_POINT_GROUP)
+
+    assert [(plugin.plugin_id, plugin.distribution) for plugin in found] == [
+        ("report.studio", "synthetic-report-studio")
+    ]
+
+
+def test_conflicting_plugin_ids_from_distinct_distributions_are_rejected(
+    isolated_plugins: Path,
+) -> None:
+    write_distribution(
+        isolated_plugins,
+        distribution_name="synthetic-conflict-a",
+        module_name="synthetic_conflict_a",
+        class_name="PluginA",
+        plugin_id="duplicate.plugin",
+    )
+    write_distribution(
+        isolated_plugins,
+        distribution_name="synthetic-conflict-b",
+        module_name="synthetic_conflict_b",
+        class_name="PluginB",
+        plugin_id="duplicate.plugin",
+    )
+    refresh_metadata_cache()
+
+    found = discover_plugins(TEST_ENTRY_POINT_GROUP)
+
+    assert len(found) == 1
+    conflict = found[0]
+    assert conflict.plugin_id == "duplicate.plugin"
+    assert conflict.discovery_error is not None
+    message = str(conflict.discovery_error)
+    assert "duplicate.plugin" in message
+    assert "synthetic-conflict-a" in message
+    assert "synthetic-conflict-b" in message
+
+
 def test_discovered_manifest_carries_modules_and_contracts(
     isolated_plugins: Path,
 ) -> None:
@@ -124,6 +182,33 @@ def test_a_distribution_without_the_group_is_ignored(
     refresh_metadata_cache()
 
     assert discover_plugins(TEST_ENTRY_POINT_GROUP) == []
+
+
+def test_unrelated_group_with_missing_distribution_name_does_not_abort_discovery(
+    isolated_plugins: Path,
+) -> None:
+    write_distribution(
+        isolated_plugins,
+        distribution_name="synthetic-valid",
+        module_name="synthetic_valid",
+        class_name="ValidPlugin",
+        plugin_id="valid.plugin",
+    )
+    malformed_info = isolated_plugins / "malformed-unrelated-0.1.0.dist-info"
+    malformed_info.mkdir()
+    (malformed_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nVersion: 0.1.0\n",
+        encoding="utf-8",
+    )
+    (malformed_info / "entry_points.txt").write_text(
+        "[unrelated]\nsetting = somewhere:Setting\n",
+        encoding="utf-8",
+    )
+    refresh_metadata_cache()
+
+    found = discover_plugins(TEST_ENTRY_POINT_GROUP)
+
+    assert [plugin.plugin_id for plugin in found] == ["valid.plugin"]
 
 
 def test_an_unloadable_entry_point_raises_discovery_error(

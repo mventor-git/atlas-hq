@@ -23,6 +23,7 @@ from atlas_sdk import (
     EventId,
     NotFoundError,
     Plugin,
+    PluginDependencyError,
     PluginLifecycle,
     PluginLifecycleError,
     PluginRegistrationError,
@@ -177,19 +178,52 @@ class Kernel:
         self._seed_clusters()
         discovered = discover_plugins(self.entry_point_group)
         self.boot_result.discovered = len(discovered)
+        for candidate in discovered:
+            if candidate.discovery_error is not None:
+                self._mark_failed(candidate.plugin_id, candidate.discovery_error)
 
         registered_ids = {p.plugin_id for p in self.registries.plugins.all()}
-        for candidate in discovered:
-            try:
-                self._advance_to_discovered(candidate)
-                self._validate(candidate)
-                self._check_dependencies(candidate, registered_ids)
-                self._register(candidate)
+        pending = [candidate for candidate in discovered if candidate.discovery_error is None]
+        first_pass = True
+        # ponytail: retries are O(n²) worst case; resolve topologically if plugin count grows.
+        while pending:
+            deferred: list[tuple[DiscoveredPlugin, PluginDependencyError]] = []
+            made_progress = False
+            for candidate in pending:
+                try:
+                    if first_pass:
+                        self._advance_to_discovered(candidate)
+                        self._validate(candidate)
+                    self._check_dependencies(candidate, registered_ids)
+                    self._register(candidate)
+                except PluginDependencyError as exc:
+                    deferred.append((candidate, exc))
+                    continue
+                except Exception as exc:  # noqa: BLE001 - any failure marks the plugin
+                    self._mark_failed(candidate.plugin_id, exc)
+                    continue
+
                 registered_ids.add(candidate.plugin_id)
                 self._plugins[candidate.plugin_id] = candidate
                 self.boot_result.registered += 1
-            except Exception as exc:  # noqa: BLE001 - any failure marks the plugin
-                self._mark_failed(candidate.plugin_id, exc)
+                made_progress = True
+
+            first_pass = False
+            if not deferred:
+                break
+            if not made_progress:
+                aggregate = PluginDependencyError(
+                    "plugin dependency resolution",
+                    [
+                        f"{candidate.plugin_id}: {error}"
+                        for candidate, failure in deferred
+                        for error in failure.errors
+                    ],
+                )
+                for candidate, _ in deferred:
+                    self._mark_failed(candidate.plugin_id, aggregate)
+                break
+            pending = [candidate for candidate, _ in deferred]
 
         return self.boot_result
 

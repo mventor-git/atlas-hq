@@ -44,11 +44,12 @@ Discovery reads distribution metadata only — **no folder scan** (`contract.md`
 identical from the discovery code, so the plugin contract never changes when a
 plugin is later shipped as its own package.
 
-Caveat worth knowing: discovery walks `importlib.metadata.distributions()` per
-distribution rather than using the `entry_points(group=...)` selector, because
-on Python 3.12 the selector collapses same-named entry points across
-distributions into one. If you hand-write a `.dist-info`, give the entry point
-a unique name.
+Discovery walks `importlib.metadata.distributions()` per distribution rather than
+using the `entry_points(group=...)` selector, because on Python 3.12 the selector
+collapses same-named entry points across distributions into one. Identical
+distribution/entry-point metadata records are deduplicated. Distinct
+distributions claiming the same plugin ID are reported as a conflict for that
+plugin only; boot marks it `FAILED` and continues with unrelated plugins.
 
 ## Adding a cluster
 
@@ -80,7 +81,10 @@ Production deployment configuration is intentionally not defined yet.
 
 Tests run from the repo root; `pyproject.toml` sets `testpaths = ["tests"]` and
 `pythonpath = ["src"]`, so `src` is importable without an install for the test
-run (but discovery needs the editable install).
+run. Runtime plugin discovery needs installed distribution metadata: local
+development uses the editable install above, while CI intentionally uses the
+non-editable `.venv/bin/python -m pip install ".[dev]"` so it does not combine
+editable and source-tree metadata.
 
 ### Test layout
 

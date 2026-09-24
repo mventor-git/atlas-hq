@@ -122,7 +122,8 @@ def _install_search_path(engine: Engine, schema: str) -> None:
     quoted_schema = engine.dialect.identifier_preparer.quote_identifier(safe_schema)
 
     @event.listens_for(engine, "connect")
-    def set_search_path(dbapi_connection: Any, _connection_record: Any) -> None:
+    @event.listens_for(engine, "checkout")
+    def set_search_path(dbapi_connection: Any, _connection_record: Any, *_args: Any) -> None:
         cursor = dbapi_connection.cursor()
         try:
             cursor.execute(f"SET SESSION search_path TO {quoted_schema}")

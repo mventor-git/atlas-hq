@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+import pytest
 from tests.synthetic import TEST_ENTRY_POINT_GROUP, refresh_metadata_cache, write_distribution
 
 from atlas_core.infrastructure.persistence.unit_of_work import SqlUnitOfWork
@@ -157,6 +158,86 @@ def test_dependencies_are_satisfied_by_a_registered_plugin(
     assert result.registered == 2
     assert result.is_clean
     assert kernel.registries.plugins.lifecycle_state("payroll") is PluginLifecycle.REGISTERED
+
+
+def test_boot_retries_a_dependency_discovered_before_its_provider(
+    isolated_plugins: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payroll_metadata = isolated_plugins / "payroll-metadata"
+    payroll_metadata.mkdir()
+    write_distribution(
+        payroll_metadata,
+        distribution_name="synthetic-payroll",
+        module_name="synthetic_payroll",
+        class_name="Payroll",
+        plugin_id="payroll",
+        plugin_name="Payroll",
+        cluster_id="cluster.employee_finance",
+        requires_plugins=("attendance",),
+    )
+    attendance_metadata = isolated_plugins / "attendance-metadata"
+    attendance_metadata.mkdir()
+    write_distribution(
+        attendance_metadata,
+        distribution_name="synthetic-attendance",
+        module_name="synthetic_attendance",
+        class_name="Attendance",
+        plugin_id="attendance",
+        plugin_name="Attendance",
+        cluster_id="cluster.workforce_and_time",
+    )
+    monkeypatch.syspath_prepend(str(attendance_metadata))
+    monkeypatch.syspath_prepend(str(payroll_metadata))
+    refresh_metadata_cache()
+
+    result = Kernel(entry_point_group=TEST_ENTRY_POINT_GROUP).boot()
+
+    assert result.discovered == 2
+    assert result.registered == 2
+    assert result.is_clean
+    assert result.failed == []
+
+
+def test_boot_isolates_a_conflicting_plugin_from_an_unrelated_plugin(
+    isolated_plugins: Path,
+) -> None:
+    write_distribution(
+        isolated_plugins,
+        distribution_name="synthetic-conflict-a",
+        module_name="synthetic_conflict_a",
+        class_name="PluginA",
+        plugin_id="duplicate.plugin",
+    )
+    write_distribution(
+        isolated_plugins,
+        distribution_name="synthetic-conflict-b",
+        module_name="synthetic_conflict_b",
+        class_name="PluginB",
+        plugin_id="duplicate.plugin",
+    )
+    write_distribution(
+        isolated_plugins,
+        distribution_name="synthetic-unrelated",
+        module_name="synthetic_unrelated",
+        class_name="Unrelated",
+        plugin_id="unrelated.plugin",
+    )
+    refresh_metadata_cache()
+
+    kernel = Kernel(entry_point_group=TEST_ENTRY_POINT_GROUP)
+    result = kernel.boot()
+
+    assert result.discovered == 2
+    assert result.registered == 1
+    assert not result.is_clean
+    assert (
+        kernel.registries.plugins.lifecycle_state("unrelated.plugin") is PluginLifecycle.REGISTERED
+    )
+    assert kernel.registries.plugins.lifecycle_state("duplicate.plugin") is PluginLifecycle.FAILED
+    reason = kernel.registries.plugins.failure_reason("duplicate.plugin") or ""
+    assert "synthetic-conflict-a" in reason
+    assert "synthetic-conflict-b" in reason
 
 
 def test_an_orphan_plugin_is_rejected_with_a_clear_error(

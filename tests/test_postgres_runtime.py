@@ -7,6 +7,7 @@ from collections.abc import Callable
 import pytest
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import Session
+from sqlalchemy.schema import CreateSchema
 
 from atlas_core.application.organization import OrganizationService
 from atlas_core.application.unit_of_work import UnitOfWorkPort
@@ -58,6 +59,87 @@ def test_postgres_schema_is_created_and_search_path_is_set(
     assert bind is not None
     assert "organization" in inspect(bind).get_table_names(schema=test_schema)
     session.close()
+
+
+def test_pooled_checkout_restores_bound_schema_before_marking_outbox(
+    database_url: str,
+    test_schema: str,
+) -> None:
+    other_schema = f"{test_schema}_other"
+    factory, engine = create_session_factory_with_engine(database_url, schema=test_schema)
+    admin_engine = create_engine(resolve_database_url(database_url), future=True)
+    sessions: list[Session] = []
+
+    def new_session() -> Session:
+        session = factory()
+        sessions.append(session)
+        return session
+
+    try:
+        create_schema(engine, test_schema)
+        with engine.begin() as connection:
+            connection.execute(CreateSchema(other_schema, if_not_exists=True))
+
+        commit_session = new_session()
+        with SqlUnitOfWork(commit_session) as uow:
+            commit_backend = commit_session.scalar(text("SELECT pg_backend_pid()"))
+            OutboxEventPublisher(uow).publish(
+                DomainEvent(event_id=EventId("test.pooled_schema"), payload={})
+            )
+        commit_session.close()
+
+        read_session = new_session()
+        read_uow = SqlUnitOfWork(read_session)
+        try:
+            read_backend = read_session.scalar(text("SELECT pg_backend_pid()"))
+            pending = read_uow.outbox.pending()
+            read_uow.rollback()
+        finally:
+            read_session.close()
+        assert len(pending) == 1
+
+        quoted_other_schema = engine.dialect.identifier_preparer.quote_identifier(other_schema)
+        with engine.connect() as connection:
+            contaminated_backend = connection.scalar(text("SELECT pg_backend_pid()"))
+            connection.execute(text(f"SET SESSION search_path TO {quoted_other_schema}"))
+            connection.commit()
+            assert connection.scalar(text("SELECT current_schema()")) == other_schema
+
+        assert read_backend == commit_backend
+        assert contaminated_backend == commit_backend
+
+        mark_session = new_session()
+        mark_uow = SqlUnitOfWork(mark_session)
+        try:
+            with mark_uow:
+                mark_backend = mark_session.scalar(text("SELECT pg_backend_pid()"))
+                mark_schema = mark_session.scalar(text("SELECT current_schema()"))
+                mark_uow.outbox.mark_dispatched(pending[0].envelope_id)
+        finally:
+            mark_session.close()
+        assert mark_backend == commit_backend
+        assert mark_schema == test_schema
+
+        verify_session = new_session()
+        verify_uow = SqlUnitOfWork(verify_session)
+        try:
+            verify_backend = verify_session.scalar(text("SELECT pg_backend_pid()"))
+            assert verify_uow.outbox.pending() == []
+            verify_uow.rollback()
+        finally:
+            verify_session.close()
+        assert verify_backend == commit_backend
+    finally:
+        for session in sessions:
+            session.close()
+        engine.dispose()
+        try:
+            drop_schema(admin_engine, test_schema)
+        finally:
+            try:
+                drop_schema(admin_engine, other_schema)
+            finally:
+                admin_engine.dispose()
 
 
 def test_commit_and_rollback_are_real_postgres_transactions(

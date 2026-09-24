@@ -52,9 +52,13 @@ is intentionally not defined yet.
 
 ## Quick commands
 
+For local development, use the editable install below. CI intentionally uses the
+non-editable `.venv/bin/python -m pip install ".[dev]"` command to avoid combining
+editable and source-tree metadata.
+
 ```bash
 uv venv --python 3.12 .venv          # create venv (or: python -m venv .venv)
-uv pip install -e ".[dev]"           # editable install + pytest/ruff/pyright
+uv pip install -e ".[dev]"           # local editable install + pytest/ruff/pyright
 
 .venv/Scripts/python.exe -m pytest  # PostgreSQL-only tests
 .venv/Scripts/ruff check src tests  # lint

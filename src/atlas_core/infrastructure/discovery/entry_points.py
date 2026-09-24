@@ -16,7 +16,8 @@ The resolved object must be a :class:`~atlas_sdk.Plugin` subclass; its class-lev
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from importlib.metadata import EntryPoint, distributions
 
 from atlas_sdk import Plugin, PluginDiscoveryError, PluginManifest
@@ -34,6 +35,7 @@ class DiscoveredPlugin:
     entry_point: str
     plugin_class: type[Plugin]
     manifest: PluginManifest
+    discovery_error: PluginDiscoveryError | None = None
 
     @property
     def instance(self) -> Plugin:
@@ -48,12 +50,29 @@ def discover_plugins(
 
     A broken or malformed entry point is reported as a
     :class:`~atlas_sdk.PluginDiscoveryError` naming the distribution, so one bad
-    package is visible instead of silently vanishing from the registry.
+    package is visible instead of silently vanishing from the registry. Distinct
+    distributions claiming the same plugin id are returned as one conflicted
+    record; the kernel marks that record failed without choosing a winner.
     """
-    discovered: list[DiscoveredPlugin] = []
+    discovered: dict[str, list[DiscoveredPlugin]] = {}
     for point in _entry_points(group):
-        discovered.append(_resolve(point))
-    return discovered
+        candidate = _resolve(point)
+        discovered.setdefault(candidate.plugin_id, []).append(candidate)
+
+    result: list[DiscoveredPlugin] = []
+    for candidates in discovered.values():
+        if len(candidates) == 1:
+            result.append(candidates[0])
+            continue
+        sources = ", ".join(
+            f"{candidate.distribution!r} -> {candidate.entry_point!r}" for candidate in candidates
+        )
+        error = PluginDiscoveryError(
+            f"plugin {candidates[0].plugin_id!r} is advertised by conflicting "
+            f"entry-point metadata: {sources}"
+        )
+        result.append(replace(candidates[0], discovery_error=error))
+    return result
 
 
 def _entry_points(group: str) -> list[EntryPoint]:
@@ -66,8 +85,28 @@ def _entry_points(group: str) -> list[EntryPoint]:
     each distribution's own list keeps them all.
     """
     found: list[EntryPoint] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
     for distribution in distributions():
-        found.extend(point for point in distribution.entry_points if point.group == group)
+        points = [point for point in distribution.entry_points if point.group == group]
+        if not points:
+            continue
+        raw_name = distribution.metadata.get("Name")
+        distribution_name = (
+            re.sub(r"[-_.]+", "-", raw_name).casefold()
+            if isinstance(raw_name, str)
+            else "<unknown>"
+        )
+        for point in points:
+            identity = (
+                distribution_name,
+                distribution.version,
+                point.group,
+                point.name,
+                point.value,
+            )
+            if identity not in seen:
+                seen.add(identity)
+                found.append(point)
     return found
 
 
