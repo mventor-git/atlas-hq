@@ -15,6 +15,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, NewType, Protocol, TypeVar
 
+from .execution import ExecutionHandle
+
 ContractId = NewType("ContractId", str)
 
 #: Sentinel: a contract id declared by another plugin. Plugins publish the
@@ -54,7 +56,12 @@ class Contract(Protocol[RequestT, ResponseT]):
 
     contract_id: ContractId
 
-    def handle(self, request: RequestT) -> ResponseT: ...
+    def handle(
+        self,
+        request: RequestT,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> ResponseT: ...
 
 
 @dataclass(frozen=True)

@@ -33,6 +33,7 @@ from atlas_sdk import (
     ContractDeclaration,
     ContractId,
     EventId,
+    ExecutionHandle,
     ModuleDeclaration,
     Plugin,
     PluginManifest,
@@ -74,7 +75,6 @@ class WorkplaceRequest:
     code: str
     kind: WorkplaceType = WorkplaceType.OFFICE
     parent_workplace_id: str | None = None
-    actor_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -83,7 +83,6 @@ class WorkforceMembershipRequest:
 
     workplace_id: str
     employee_id: str
-    actor_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -91,7 +90,6 @@ class WorkforceRequest:
     """Request shape of ``workplace.workforce`` — the workforce of a workplace."""
 
     workplace_id: str
-    actor_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -99,7 +97,6 @@ class WorkplaceContextRequest:
     """Request shape of ``workplace.context`` — resolve context for a scope."""
 
     workplace_id: str
-    actor_id: str = ""
 
 
 class WorkplaceWorkforceContract(Contract[WorkforceRequest, list[WorkplaceMember]]):
@@ -115,9 +112,17 @@ class WorkplaceWorkforceContract(Contract[WorkforceRequest, list[WorkplaceMember
     def __init__(self, service: WorkplaceOperationsService) -> None:
         self._service = service
 
-    def handle(self, request: WorkforceRequest) -> list[WorkplaceMember]:
-        self._service.assert_workforce_visible(request.workplace_id, request.actor_id)
-        return self._service.list_workforce(request.workplace_id)
+    def handle(
+        self,
+        request: WorkforceRequest,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> list[WorkplaceMember]:
+        self._service.assert_workforce_visible(request.workplace_id, execution_handle)
+        return self._service.list_workforce(
+            request.workplace_id,
+            execution_handle=execution_handle,
+        )
 
 
 class WorkplaceContextContract(Contract[WorkplaceContextRequest, WorkplaceContext]):
@@ -132,8 +137,16 @@ class WorkplaceContextContract(Contract[WorkplaceContextRequest, WorkplaceContex
     def __init__(self, service: WorkplaceOperationsService) -> None:
         self._service = service
 
-    def handle(self, request: WorkplaceContextRequest) -> WorkplaceContext:
-        return self._service.resolve_context(request.workplace_id)
+    def handle(
+        self,
+        request: WorkplaceContextRequest,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> WorkplaceContext:
+        return self._service.resolve_workplace_context(
+            request.workplace_id,
+            execution_handle=execution_handle,
+        )
 
 
 class WorkplaceWorkforceDatasetContract(Contract[DatasetRequest, DatasetResponse]):
@@ -150,8 +163,16 @@ class WorkplaceWorkforceDatasetContract(Contract[DatasetRequest, DatasetResponse
     def __init__(self, service: WorkplaceOperationsService) -> None:
         self._service = service
 
-    def handle(self, request: DatasetRequest) -> DatasetResponse:
-        return self._service.workforce_dataset(request.organization_id)
+    def handle(
+        self,
+        request: DatasetRequest,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> DatasetResponse:
+        return self._service.workforce_dataset(
+            request.organization_id,
+            execution_handle=execution_handle,
+        )
 
 
 class WorkplaceOperationsPlugin(Plugin):
@@ -177,6 +198,7 @@ class WorkplaceOperationsPlugin(Plugin):
             ),
         ),
         provides_capabilities=(WORKPLACE_MANAGE, WORKPLACE_VIEW),
+        owned_tables=("wpop_workplace", "wpop_workforce_membership"),
         provides_contracts=(
             ContractDeclaration(
                 contract_id=WORKPLACE_WORKFORCE_CONTRACT,
@@ -185,7 +207,6 @@ class WorkplaceOperationsPlugin(Plugin):
                     "type": "object",
                     "properties": {
                         "workplace_id": {"type": "string"},
-                        "actor_id": {"type": "string"},
                     },
                     "required": ["workplace_id"],
                 },
@@ -198,7 +219,6 @@ class WorkplaceOperationsPlugin(Plugin):
                     "type": "object",
                     "properties": {
                         "workplace_id": {"type": "string"},
-                        "actor_id": {"type": "string"},
                     },
                     "required": ["workplace_id"],
                 },
@@ -252,7 +272,12 @@ class WorkplaceOperationsPlugin(Plugin):
 
     # --- the plugin's service surface -------------------------------------
 
-    def create_workplace(self, request: WorkplaceRequest) -> Workplace:
+    def create_workplace(
+        self,
+        request: WorkplaceRequest,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> Workplace:
         return self.context.transactions.run(
             lambda: self._service.create_workplace(
                 organization_id=request.organization_id,
@@ -260,25 +285,35 @@ class WorkplaceOperationsPlugin(Plugin):
                 code=request.code,
                 kind=request.kind,
                 parent_workplace_id=request.parent_workplace_id,
-                actor=request.actor_id,
+                execution_handle=execution_handle,
             )
         )
 
-    def add_workforce_member(self, request: WorkforceMembershipRequest) -> WorkplaceMember:
+    def add_workforce_member(
+        self,
+        request: WorkforceMembershipRequest,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> WorkplaceMember:
         return self.context.transactions.run(
             lambda: self._service.add_workforce_member(
                 workplace_id=request.workplace_id,
                 employee_id=request.employee_id,
-                actor=request.actor_id,
+                execution_handle=execution_handle,
             )
         )
 
-    def remove_workforce_member(self, request: WorkforceMembershipRequest) -> None:
+    def remove_workforce_member(
+        self,
+        request: WorkforceMembershipRequest,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> None:
         self.context.transactions.run(
             lambda: self._service.remove_workforce_member(
                 workplace_id=request.workplace_id,
                 employee_id=request.employee_id,
-                actor=request.actor_id,
+                execution_handle=execution_handle,
             )
         )
 
@@ -286,16 +321,42 @@ class WorkplaceOperationsPlugin(Plugin):
         self,
         organization_id: str | None = None,
         kind: WorkplaceType | None = None,
+        *,
+        execution_handle: ExecutionHandle,
     ) -> list[Workplace]:
         return self.context.transactions.run(
-            lambda: self._service.list_workplaces(organization_id, kind)
+            lambda: self._service.list_workplaces(
+                organization_id,
+                kind,
+                execution_handle=execution_handle,
+            )
         )
 
-    def list_workforce(self, workplace_id: str) -> list[WorkplaceMember]:
-        return self.context.transactions.run(lambda: self._service.list_workforce(workplace_id))
+    def list_workforce(
+        self,
+        workplace_id: str,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> list[WorkplaceMember]:
+        return self.context.transactions.run(
+            lambda: self._service.list_workforce(
+                workplace_id,
+                execution_handle=execution_handle,
+            )
+        )
 
-    def resolve_context(self, workplace_id: str) -> WorkplaceContext:
-        return self.context.transactions.run(lambda: self._service.resolve_context(workplace_id))
+    def resolve_workplace_context(
+        self,
+        workplace_id: str,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> WorkplaceContext:
+        return self.context.transactions.run(
+            lambda: self._service.resolve_workplace_context(
+                workplace_id,
+                execution_handle=execution_handle,
+            )
+        )
 
 
 __all__ = [

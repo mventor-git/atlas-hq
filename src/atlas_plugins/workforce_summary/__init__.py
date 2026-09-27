@@ -9,7 +9,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from atlas_sdk import Contract, ModuleDeclaration, Plugin, PluginManifest
+from atlas_sdk import (
+    AuthorizationError,
+    CapabilityId,
+    Contract,
+    ExecutionHandle,
+    ModuleDeclaration,
+    Plugin,
+    PluginManifest,
+)
 from atlas_sdk.reporting import (
     REPORT_DATASET_CONTRACT,
     REPORT_DATASET_DECLARATION,
@@ -27,9 +35,24 @@ class WorkforceSummaryContract(Contract[DatasetRequest, DatasetResponse]):
     def __init__(self, context: PluginContext) -> None:
         self._context = context
 
-    def handle(self, request: DatasetRequest) -> DatasetResponse:
-        # A real core service, scoped by organization (Gate N).
-        employees = self._context.people.list_employees(request.organization_id)
+    def handle(
+        self,
+        request: DatasetRequest,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> DatasetResponse:
+        requested_scope = self._context.scope.resolve(request.organization_id)
+        decision = self._context.authorization.authorize(
+            execution_handle,
+            CapabilityId("report.render"),
+            requested_scope,
+        )
+        if not decision.allowed:
+            raise AuthorizationError(f"dataset read denied: {decision.code}")
+        employees = self._context.people.list_employees(
+            request.organization_id,
+            execution_handle=execution_handle,
+        )
         rows = tuple((e.employee_number, e.full_name, e.status) for e in employees)
         return DatasetResponse(
             dataset_id="workforce.summary",

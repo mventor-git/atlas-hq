@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from atlas_sdk import (
     ContractId,
     EventId,
+    ExecutionHandle,
     ModuleDeclaration,
     Plugin,
     PluginManifest,
@@ -42,7 +43,6 @@ class GreetingReceived:
 
     employee_id: str
     full_name: str
-    actor_id: str
 
 
 class AtlasDemoConsumerPlugin(Plugin):
@@ -87,22 +87,26 @@ class AtlasDemoConsumerPlugin(Plugin):
             GreetingReceived(
                 employee_id=str(event.payload.get("employee_id", "")),
                 full_name=str(event.payload.get("full_name", "")),
-                actor_id=str(event.payload.get("actor_id", "")),
             ),
         )
 
-    def call_greeting(self, employee_id: str, actor_id: str, organization_id: str) -> object:
-        """Invoke whichever plugin currently provides ``demo.greeting``.
-
-        The return type is deliberately ``object`` to B: the consumer knows the
-        contract's *id*, not the provider's response class (contract section 9).
-        """
+    def call_greeting(
+        self,
+        employee_id: str,
+        organization_id: str,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> object:
+        """Invoke whichever plugin currently provides ``demo.greeting``."""
         request = _GreetingRequest(
             employee_id=employee_id,
-            actor_id=actor_id,
             organization_id=organization_id,
         )
-        return self.context.invoker.invoke(GREETING_CONTRACT, request)
+        return self.context.invoker.invoke(
+            GREETING_CONTRACT,
+            request,
+            execution_handle=execution_handle,
+        )
 
 
 @dataclass(frozen=True)
@@ -115,7 +119,6 @@ class _GreetingRequest:
     """
 
     employee_id: str
-    actor_id: str
     organization_id: str
 
 

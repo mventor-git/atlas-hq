@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Atlas-HQ console</title>
+    <script>
+      // §39.6: the Core-owned theme is the preference. This local mirror only
+      // prevents a light-first flash before Core answers, and it never wins over
+      // a value Core has stored.
+      try {
+        const cached = localStorage.getItem("atlas.theme.cache");
+        if (cached === "light" || cached === "dark") {
+          document.documentElement.dataset.theme = cached;
+        }
+      } catch {
+        /* a blocked or absent localStorage is conformant: render light */
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

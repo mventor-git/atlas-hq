@@ -15,11 +15,21 @@ from datetime import date
 from typing import cast
 
 import pytest
-from sqlalchemy import text
+from tests.conftest import (
+    assign_role_for_test,
+    issue_handle_for_test,
+    issue_uow_handle_for_test,
+)
 
 from atlas_core.application.organization import OrganizationService
 from atlas_core.application.people import PeopleService
 from atlas_core.application.unit_of_work import UnitOfWorkPort
+from atlas_core.domain.role import (
+    AUDIT_READ,
+    ORGANIZATION_MANAGE,
+    PEOPLE_EMPLOYEE_CREATE,
+    PEOPLE_EMPLOYEE_READ,
+)
 from atlas_core.infrastructure.events import OutboxEventPublisher
 from atlas_core.infrastructure.persistence.unit_of_work import SqlUnitOfWork
 from atlas_core.kernel import Kernel
@@ -35,7 +45,13 @@ from atlas_plugins.attendance_operations import (
     DailySummary,
     DailySummaryRequest,
 )
-from atlas_plugins.report_studio import RenderedReport, ReportRequest, ReportStudioPlugin
+from atlas_plugins.attendance_operations.persistence import AttendanceOperationsRepository
+from atlas_plugins.report_studio import (
+    REPORT_RENDER,
+    RenderedReport,
+    ReportRequest,
+    ReportStudioPlugin,
+)
 from atlas_plugins.workplace_operations import (
     WorkforceMembershipRequest,
     WorkplaceOperationsPlugin,
@@ -44,8 +60,10 @@ from atlas_plugins.workplace_operations import (
 from atlas_sdk import (
     AttendanceStatus,
     AuthorizationError,
+    CapabilityId,
     DomainEvent,
     NotFoundError,
+    Scope,
     WorkplaceType,
 )
 from atlas_sdk.reporting import REPORT_DATASET_CONTRACT
@@ -91,35 +109,101 @@ def world(
 ) -> World:
     workplace = _workplace_plugin(attendance_kernel)
     workplace_context = attendance_kernel.context_for("workplace_operations")
-    attendance_context = attendance_kernel.context_for("attendance_operations")
-    report_context = attendance_kernel.context_for("report_studio")
 
     with uow_factory() as uow:
-        org = OrganizationService(uow).create_organization(name="Acme", code="ACME")
-        other = OrganizationService(uow).create_organization(name="Northwind", code="NW")
+        org = OrganizationService(uow).create_organization(
+            name="Acme",
+            code="ACME",
+            execution_handle=issue_uow_handle_for_test(
+                uow_factory,
+                ORGANIZATION_MANAGE,
+                "organization.create",
+                Scope(principal_id="seed.attendance"),
+                principal_id="seed.attendance",
+            ),
+        )
+        other = OrganizationService(uow).create_organization(
+            name="Northwind",
+            code="NW",
+            execution_handle=issue_uow_handle_for_test(
+                uow_factory,
+                ORGANIZATION_MANAGE,
+                "organization.create",
+                Scope(principal_id="seed.attendance.other"),
+                principal_id="seed.attendance.other",
+            ),
+        )
         people = PeopleService(uow, OutboxEventPublisher(uow, publisher="seed"))
         ada = people.create_employee(
             full_name="Ada Lovelace",
             employee_number="EMP-1",
             organization_id=org.organization_id,
+            execution_handle=issue_uow_handle_for_test(
+                uow_factory,
+                PEOPLE_EMPLOYEE_CREATE,
+                "people.employee.create",
+                Scope(organization_id=org.organization_id),
+            ),
         )
         grace = people.create_employee(
             full_name="Grace Hopper",
             employee_number="EMP-2",
             organization_id=org.organization_id,
+            execution_handle=issue_uow_handle_for_test(
+                uow_factory,
+                PEOPLE_EMPLOYEE_CREATE,
+                "people.employee.create",
+                Scope(organization_id=org.organization_id),
+            ),
         )
 
     scope = workplace_context.scope.resolve(org.organization_id)
     other_scope = workplace_context.scope.resolve(other.organization_id)
     # The workplace admin builds the rosters in both organizations.
-    workplace_context.authorization.grant(WORKPLACE_ADMIN, WORKPLACE_MANAGER_ROLE, scope)
-    workplace_context.authorization.grant(WORKPLACE_ADMIN, WORKPLACE_MANAGER_ROLE, other_scope)
+    assign_role_for_test(attendance_kernel, WORKPLACE_ADMIN, WORKPLACE_MANAGER_ROLE, scope)
+    assign_role_for_test(attendance_kernel, WORKPLACE_ADMIN, WORKPLACE_MANAGER_ROLE, other_scope)
     # The attendance actor may record and view attendance in Acme, and must also
     # be able to read Acme's roster: the workforce contract authorizes its caller
     # with ``workplace.view`` (Gate K authorizes the caller, not the plugin).
-    attendance_context.authorization.grant(ACTOR, ATTENDANCE_MANAGER_ROLE, scope)
-    workplace_context.authorization.grant(ACTOR, WORKPLACE_VIEWER_ROLE, scope)
-    report_context.authorization.grant(ACTOR, REPORT_RENDERER_ROLE, scope)
+    assign_role_for_test(attendance_kernel, ACTOR, ATTENDANCE_MANAGER_ROLE, scope)
+    assign_role_for_test(attendance_kernel, ACTOR, WORKPLACE_VIEWER_ROLE, scope)
+    assign_role_for_test(attendance_kernel, ACTOR, REPORT_RENDERER_ROLE, scope)
+    attendance_kernel.authorization_management.grant_capability(
+        WORKPLACE_ADMIN, PEOPLE_EMPLOYEE_READ, scope, actor="tests"
+    )
+    attendance_kernel.authorization_management.grant_capability(
+        WORKPLACE_ADMIN, PEOPLE_EMPLOYEE_READ, other_scope, actor="tests"
+    )
+    attendance_kernel.authorization_management.grant_capability(
+        ACTOR, PEOPLE_EMPLOYEE_READ, scope, actor="tests"
+    )
+    attendance_kernel.authorization_management.grant_capability(
+        ACTOR, PEOPLE_EMPLOYEE_READ, Scope(principal_id=ACTOR), actor="tests"
+    )
+    attendance_kernel.authorization_management.grant_capability(
+        ACTOR, AUDIT_READ, scope, actor="tests"
+    )
+    attendance_kernel.authorization_management.grant_capability(
+        WORKPLACE_ADMIN, AUDIT_READ, scope, actor="tests"
+    )
+    attendance_kernel.authorization_management.grant_capability(
+        WORKPLACE_ADMIN, AUDIT_READ, other_scope, actor="tests"
+    )
+
+    workplace_admin_context = _context(
+        attendance_kernel,
+        org.organization_id,
+        capability=CapabilityId("workplace.manage"),
+        action="workplace.create",
+        actor=WORKPLACE_ADMIN,
+    )
+    other_admin_context = _context(
+        attendance_kernel,
+        other.organization_id,
+        capability=CapabilityId("workplace.manage"),
+        action="workplace.create",
+        actor=WORKPLACE_ADMIN,
+    )
 
     site = workplace.create_workplace(
         WorkplaceRequest(
@@ -127,13 +211,12 @@ def world(
             name="Riverside Tower",
             code="RT-01",
             kind=WorkplaceType.SITE,
-            actor_id=WORKPLACE_ADMIN,
         ),
+        execution_handle=workplace_admin_context,
     )
     workplace.add_workforce_member(
-        WorkforceMembershipRequest(
-            workplace_id=site.workplace_id, employee_id=ada.employee_id, actor_id=WORKPLACE_ADMIN
-        ),
+        WorkforceMembershipRequest(workplace_id=site.workplace_id, employee_id=ada.employee_id),
+        execution_handle=workplace_admin_context,
     )
     hq = workplace.create_workplace(
         WorkplaceRequest(
@@ -141,8 +224,8 @@ def world(
             name="Northwind Office",
             code="NW-01",
             kind=WorkplaceType.OFFICE,
-            actor_id=WORKPLACE_ADMIN,
         ),
+        execution_handle=other_admin_context,
     )
     return World(
         org_id=org.organization_id,
@@ -152,6 +235,11 @@ def world(
         member_id=ada.employee_id,
         outsider_id=grace.employee_id,
     )
+
+
+def _attendance_rows(uow: UnitOfWorkPort):
+    persistence = uow.plugin_persistence("attendance_operations", ("att_attendance",))
+    return AttendanceOperationsRepository(persistence).list_for_organization(None)
 
 
 def _plugin(kernel: Kernel) -> AttendanceOperationsPlugin:
@@ -166,6 +254,29 @@ def _workplace_plugin(kernel: Kernel) -> WorkplaceOperationsPlugin:
     return instance
 
 
+def _context(
+    kernel: Kernel,
+    org_id: str,
+    *,
+    capability: CapabilityId = ATTENDANCE_VIEW,
+    action: str = "attendance.view",
+    actor: str = ACTOR,
+    resource_id: str | None = None,
+):
+    additional = [PEOPLE_EMPLOYEE_READ, CapabilityId("workplace.view"), AUDIT_READ]
+    if capability == REPORT_RENDER:
+        additional.append(CapabilityId("attendance.view"))
+    return issue_handle_for_test(
+        kernel,
+        actor,
+        capability,
+        action,
+        kernel.context_for("attendance_operations").scope.resolve(org_id),
+        resource_id=resource_id,
+        additional_capabilities=tuple(additional),
+    )
+
+
 def _record(
     kernel: Kernel,
     employee_id: str,
@@ -175,14 +286,42 @@ def _record(
     actor: str = ACTOR,
 ) -> AttendanceRecord:
     """Record attendance through the plugin's own service surface."""
+    from atlas_core.domain.identifiers import EmployeeId
+
+    assert kernel.uow_factory is not None
+    with kernel.uow_factory() as uow:
+        employee = uow.employees.get(EmployeeId(employee_id))
+    if employee is None:
+        execution_handle = issue_handle_for_test(
+            kernel,
+            actor,
+            ATTENDANCE_MANAGE,
+            "attendance.manage",
+            Scope(principal_id=actor),
+            resource_id=employee_id,
+            additional_capabilities=(
+                PEOPLE_EMPLOYEE_READ,
+                CapabilityId("workplace.view"),
+                AUDIT_READ,
+            ),
+        )
+    else:
+        execution_handle = _context(
+            kernel,
+            employee.organization_id,
+            capability=ATTENDANCE_MANAGE,
+            action="attendance.manage",
+            actor=actor,
+            resource_id=employee_id,
+        )
     return _plugin(kernel).record_attendance(
         AttendanceRecordRequest(
             employee_id=employee_id,
             workplace_id=workplace_id,
             date=day,
             status=status,
-            actor_id=actor,
         ),
+        execution_handle=execution_handle,
     )
 
 
@@ -190,7 +329,16 @@ def _render(kernel: Kernel, org_id: str) -> RenderedReport:
     """Render through the live Report Studio instance — never naming a provider."""
     instance = kernel._instances["report_studio"]
     assert isinstance(instance, ReportStudioPlugin)
-    return instance.render(ReportRequest(organization_id=org_id, actor_id=ACTOR))
+    return instance.render(
+        ReportRequest(organization_id=org_id),
+        execution_handle=_context(
+            kernel,
+            org_id,
+            capability=REPORT_RENDER,
+            action="report.render",
+            resource_id=org_id,
+        ),
+    )
 
 
 # --- registration (Gates C, D, E, F, G, H) ---------------------------------
@@ -242,7 +390,16 @@ def test_records_attendance_for_a_workforce_member(
     assert record.organization_id == world.org_id
 
     # Persistence is real: the plugin's own query reads the row back.
-    summary = _plugin(attendance_kernel).daily_summary(world.workplace_id, DAY)
+    summary = _plugin(attendance_kernel).daily_summary(
+        world.workplace_id,
+        DAY,
+        execution_handle=_context(
+            attendance_kernel,
+            world.org_id,
+            action="attendance.read",
+            resource_id=world.workplace_id,
+        ),
+    )
     assert summary.recorded_count == 1
     assert summary.entries[0].employee_id == world.member_id
     assert summary.entries[0].status == AttendanceStatus.PRESENT
@@ -287,7 +444,7 @@ def test_recording_requires_the_workplaces_view_right(
     """
     context = attendance_kernel.context_for("attendance_operations")
     scope = context.scope.resolve(world.org_id)
-    context.authorization.grant("user.no_roster_view", ATTENDANCE_MANAGER_ROLE, scope)
+    assign_role_for_test(attendance_kernel, "user.no_roster_view", ATTENDANCE_MANAGER_ROLE, scope)
 
     with pytest.raises(AuthorizationError):
         _record(
@@ -318,7 +475,16 @@ def test_recording_writes_an_audit_record(
     _record(attendance_kernel, world.member_id, world.workplace_id)
 
     context = attendance_kernel.context_for("attendance_operations")
-    records = context.audit.list_records(organization_id=world.org_id, limit=20)
+    records = context.audit.list_records(
+        organization_id=world.org_id,
+        limit=20,
+        execution_handle=_context(
+            attendance_kernel,
+            world.org_id,
+            action="attendance.audit.read",
+            resource_id=world.org_id,
+        ),
+    )
     assert any(r.action == "attendance.recorded" for r in records)
 
 
@@ -344,11 +510,10 @@ def test_an_actor_scoped_elsewhere_cannot_record(
     world: World,
 ) -> None:
     """Gate N: an actor granted only in Northwind cannot record in Acme."""
-    attendance_context = attendance_kernel.context_for("attendance_operations")
     workplace_context = attendance_kernel.context_for("workplace_operations")
     foreign = workplace_context.scope.resolve(world.other_org_id)
-    attendance_context.authorization.grant("user.northwind_only", ATTENDANCE_MANAGER_ROLE, foreign)
-    workplace_context.authorization.grant("user.northwind_only", WORKPLACE_VIEWER_ROLE, foreign)
+    assign_role_for_test(attendance_kernel, "user.northwind_only", ATTENDANCE_MANAGER_ROLE, foreign)
+    assign_role_for_test(attendance_kernel, "user.northwind_only", WORKPLACE_VIEWER_ROLE, foreign)
 
     with pytest.raises(AuthorizationError):
         _record(
@@ -370,7 +535,12 @@ def test_the_summary_is_scoped_to_its_organization(
             DailySummaryRequest(
                 workplace_id=world.other_workplace_id,
                 date=DAY,
-                actor_id=ACTOR,
+            ),
+            execution_handle=_context(
+                attendance_kernel,
+                world.org_id,
+                action="attendance.read",
+                resource_id=world.other_workplace_id,
             ),
         )
 
@@ -391,7 +561,13 @@ def test_daily_summary_contract_answers_through_the_registry(
 
     summary = attendance_kernel.registries.contracts.invoke(
         ATTENDANCE_DAILY_SUMMARY_CONTRACT,
-        DailySummaryRequest(workplace_id=world.workplace_id, date=DAY, actor_id=ACTOR),
+        DailySummaryRequest(workplace_id=world.workplace_id, date=DAY),
+        execution_handle=_context(
+            attendance_kernel,
+            world.org_id,
+            action="attendance.read",
+            resource_id=world.workplace_id,
+        ),
     )
     summary = cast("DailySummary", summary)
 
@@ -475,13 +651,34 @@ def test_recording_the_same_employee_workplace_and_date_twice_upserts(
     )
 
     assert updated.status == AttendanceStatus.ON_LEAVE
-    summary = _plugin(attendance_kernel).daily_summary(world.workplace_id, DAY)
+    summary = _plugin(attendance_kernel).daily_summary(
+        world.workplace_id,
+        DAY,
+        execution_handle=_context(
+            attendance_kernel,
+            world.org_id,
+            action="attendance.read",
+            resource_id=world.workplace_id,
+        ),
+    )
     assert summary.recorded_count == 1
     assert summary.entries[0].status == AttendanceStatus.ON_LEAVE
 
     # Both passes are audited, with distinct actions.
     context = attendance_kernel.context_for("attendance_operations")
-    actions = [r.action for r in context.audit.list_records(organization_id=world.org_id, limit=50)]
+    actions = [
+        r.action
+        for r in context.audit.list_records(
+            organization_id=world.org_id,
+            limit=50,
+            execution_handle=_context(
+                attendance_kernel,
+                world.org_id,
+                action="attendance.audit.read",
+                resource_id=world.org_id,
+            ),
+        )
+    ]
     assert "attendance.recorded" in actions
     assert "attendance.updated" in actions
 
@@ -510,10 +707,12 @@ def test_a_direct_record_commits_without_a_manual_commit(
 
     with uow_factory() as uow:
         assert isinstance(uow, SqlUnitOfWork)
-        rows = list(uow.session.execute(text("SELECT employee_id, status FROM att_attendance")))
+        rows = _attendance_rows(uow)
         pending = uow.outbox.pending(limit=50)
 
-    assert [(row[0], row[1]) for row in rows] == [(world.member_id, AttendanceStatus.PRESENT.value)]
+    assert [(row.employee_id, row.status) for row in rows] == [
+        (world.member_id, AttendanceStatus.PRESENT.value)
+    ]
     assert any(
         e.event_id == ATTENDANCE_RECORDED
         and e.event.payload.get("attendance_id") == record.attendance_id
@@ -537,7 +736,16 @@ def test_direct_attendance_reads_run_through_the_platform_runner(
 
     monkeypatch.setattr(context.transactions, "run", tracked_run)
 
-    _plugin(attendance_kernel).daily_summary(world.workplace_id, DAY)
+    _plugin(attendance_kernel).daily_summary(
+        world.workplace_id,
+        DAY,
+        execution_handle=_context(
+            attendance_kernel,
+            world.org_id,
+            action="attendance.read",
+            resource_id=world.workplace_id,
+        ),
+    )
 
     assert calls == 1
 
@@ -553,9 +761,9 @@ def test_publication_failure_rolls_back_the_whole_direct_record(
     original_publish = context.events.publish
     failed_once = False
 
-    def publish_then_fail(event: DomainEvent) -> None:
+    def publish_then_fail(event: DomainEvent, *, execution_handle) -> None:
         nonlocal failed_once
-        original_publish(event)
+        original_publish(event, execution_handle=execution_handle)
         if not failed_once:
             failed_once = True
             raise RuntimeError("publication failed")
@@ -567,7 +775,7 @@ def test_publication_failure_rolls_back_the_whole_direct_record(
 
     with uow_factory() as uow:
         assert isinstance(uow, SqlUnitOfWork)
-        rows = list(uow.session.execute(text("SELECT employee_id FROM att_attendance")))
+        rows = _attendance_rows(uow)
         audits = list(uow.audit.all(organization_id=world.org_id, limit=50))
         envelopes = list(uow.outbox.pending(limit=50))
 
@@ -581,11 +789,11 @@ def test_publication_failure_rolls_back_the_whole_direct_record(
 
     with uow_factory() as uow:
         assert isinstance(uow, SqlUnitOfWork)
-        rows = list(uow.session.execute(text("SELECT employee_id FROM att_attendance")))
+        rows = _attendance_rows(uow)
         audits = list(uow.audit.all(organization_id=world.org_id, limit=50))
         envelopes = list(uow.outbox.pending(limit=50))
 
-    assert [(row[0],) for row in rows] == [(world.member_id,)]
+    assert [row.employee_id for row in rows] == [world.member_id]
     assert any(record_audit.action == "attendance.recorded" for record_audit in audits)
     assert any(
         envelope.event_id == ATTENDANCE_RECORDED
@@ -609,7 +817,13 @@ def test_contract_invocation_does_not_nest_the_direct_runner(
 
     summary = attendance_kernel.registries.contracts.invoke(
         ATTENDANCE_DAILY_SUMMARY_CONTRACT,
-        DailySummaryRequest(workplace_id=world.workplace_id, date=DAY, actor_id=ACTOR),
+        DailySummaryRequest(workplace_id=world.workplace_id, date=DAY),
+        execution_handle=_context(
+            attendance_kernel,
+            world.org_id,
+            action="attendance.read",
+            resource_id=world.workplace_id,
+        ),
     )
 
     assert cast("DailySummary", summary).workplace_id == world.workplace_id

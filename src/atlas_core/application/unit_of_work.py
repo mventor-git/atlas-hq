@@ -16,34 +16,23 @@ Usage::
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, Self
+from collections.abc import Callable
+from typing import Protocol, Self
 
 from atlas_sdk import PluginPersistencePort
 
 from .repositories import (
     AssignmentRepositoryPort,
     AuditRepositoryPort,
+    AuthorizationRepositoryPort,
     EmployeeRepositoryPort,
+    ExecutionRepositoryPort,
     JobRepositoryPort,
     OrganizationRepositoryPort,
     OutboxRepositoryPort,
+    PolicyRepositoryPort,
     WorkplaceRepositoryPort,
 )
-
-if TYPE_CHECKING:
-    from sqlalchemy.orm import Session
-
-
-class SessionFactoryPort(Protocol):
-    """Internal sessions sharing this unit of work's transaction (§22).
-
-    Plugin code never receives this port; it receives the restricted
-    :class:`~atlas_sdk.PluginPersistencePort` adapter instead.
-    """
-
-    def __call__(self) -> Session:
-        """A session already sharing this unit of work's transaction."""
-        ...
 
 
 class UnitOfWorkPort(Protocol):
@@ -55,14 +44,39 @@ class UnitOfWorkPort(Protocol):
     jobs: JobRepositoryPort
     assignments: AssignmentRepositoryPort
     audit: AuditRepositoryPort
+    authorization: AuthorizationRepositoryPort
+    policies: PolicyRepositoryPort
+    executions: ExecutionRepositoryPort
     outbox: OutboxRepositoryPort
-    #: Restricted persistence shared by plugin-owned tables (§22).
-    persistence: PluginPersistencePort
-    #: Sessions sharing this transaction for internal adapters (§22).
-    sessions: SessionFactoryPort
+
+    def plugin_persistence(
+        self,
+        plugin_id: str,
+        owned_tables: tuple[str, ...],
+    ) -> PluginPersistencePort:
+        """Create an owner-checked adapter for a plugin."""
+        ...
+
+    @property
+    def independent_uow_factory(self) -> Callable[[], UnitOfWorkPort]:
+        """A factory for separate units of work on the same database.
+
+        The durable denial audit commits independently, so it can never be
+        written through the caller's own unit of work.
+        """
+        ...
 
     def begin(self) -> None:
         """Start a transaction. Idempotent: a nested begin is a no-op."""
+        ...
+
+    @property
+    def in_transaction(self) -> bool:
+        """Whether this UoW currently owns an open transaction."""
+        ...
+
+    def finish_read(self) -> None:
+        """Close an implicit read transaction without claiming a write commit."""
         ...
 
     def commit(self) -> None: ...
@@ -71,10 +85,14 @@ class UnitOfWorkPort(Protocol):
         """Mark this cached unit of work unusable after rollback failure."""
         ...
 
+    def close(self) -> None:
+        """Close the Core-owned session; not exposed through PluginContext."""
+        ...
+
     def __enter__(self) -> Self: ...
     def __exit__(self, exc_type, exc, tb) -> None:
         """Commit on a clean exit, roll back on any exception."""
         ...
 
 
-__all__ = ["SessionFactoryPort", "UnitOfWorkPort"]
+__all__ = ["UnitOfWorkPort"]

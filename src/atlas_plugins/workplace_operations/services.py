@@ -14,14 +14,13 @@ workforce membership.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-
 from atlas_sdk import (
     AuthorizationError,
     CapabilityId,
     DomainEvent,
     Employee,
     EventId,
+    ExecutionHandle,
     NotFoundError,
     Scope,
     WorkplaceType,
@@ -52,33 +51,46 @@ class WorkplaceOperationsService:
     fresh instance per call would be equivalent; one instance is simpler.
     """
 
-    def __init__(
-        self,
-        context: PluginContext,
-        capability: Callable[[str, Scope, str], bool] | None = None,
-    ) -> None:
+    def __init__(self, context: PluginContext) -> None:
         self._context = context
-        self._capability = capability or context.authorization.check
 
     # --- helpers -----------------------------------------------------------
 
     def _repo(self) -> WorkplaceOperationsRepository:
         return WorkplaceOperationsRepository(self._context.persistence)
 
-    def _require_capability(self, capability: CapabilityId, scope: Scope, actor: str) -> None:
-        if not self._capability(capability, scope, actor):
-            msg = f"{actor!r} lacks capability {capability} in scope {scope}"
-            raise AuthorizationError(msg)
+    def _require_capability(
+        self,
+        capability: CapabilityId,
+        scope: Scope,
+        execution_handle: ExecutionHandle,
+    ) -> None:
+        decision = self._context.authorization.authorize(execution_handle, capability, scope)
+        if not decision.allowed:
+            raise AuthorizationError(f"workplace operation denied: {decision.code}")
 
-    def _publish(self, event: EventId, payload: dict[str, object]) -> None:
-        self._context.events.publish(DomainEvent(event_id=event, payload=payload))
+    def _publish(
+        self,
+        event: EventId,
+        payload: dict[str, object],
+        execution_handle: ExecutionHandle,
+    ) -> None:
+        self._context.events.publish(
+            DomainEvent(event_id=event, payload=payload),
+            execution_handle=execution_handle,
+        )
 
-    def _audit(self, action: str, actor: str, scope: Scope, details: dict[str, object]) -> str:
+    def _audit(
+        self,
+        action: str,
+        scope: Scope,
+        details: dict[str, object],
+        execution_handle: ExecutionHandle,
+    ) -> str:
         return self._context.audit.record(
             action=action,
-            actor=actor,
-            scope=scope,
             details=details,
+            execution_handle=execution_handle,
         )
 
     def _to_workplace(self, row: WorkplaceORM) -> Workplace:
@@ -100,7 +112,7 @@ class WorkplaceOperationsService:
         code: str,
         kind: WorkplaceType,
         parent_workplace_id: str | None,
-        actor: str,
+        execution_handle: ExecutionHandle,
     ) -> Workplace:
         """Register a workplace under an organization (contract section 27).
 
@@ -109,7 +121,11 @@ class WorkplaceOperationsService:
         workplace rather than the platform's identity.
         """
         scope = self._context.scope.resolve(organization_id)
-        self._require_capability(CapabilityId("workplace.manage"), scope, actor)
+        self._require_capability(
+            CapabilityId("workplace.manage"),
+            scope,
+            execution_handle,
+        )
 
         repo = self._repo()
         if not name.strip() or not code.strip():
@@ -132,8 +148,8 @@ class WorkplaceOperationsService:
         read_model = self._to_workplace(workplace)
         self._audit(
             action="workplace.created",
-            actor=actor,
             scope=scope,
+            execution_handle=execution_handle,
             details={"workplace_id": read_model.workplace_id, "code": code, "kind": kind.value},
         )
         self._publish(
@@ -144,8 +160,8 @@ class WorkplaceOperationsService:
                 "code": code,
                 "kind": kind.value,
                 "name": name,
-                "actor_id": actor,
             },
+            execution_handle,
         )
         return read_model
 
@@ -155,7 +171,7 @@ class WorkplaceOperationsService:
         self,
         workplace_id: str,
         employee_id: str,
-        actor: str,
+        execution_handle: ExecutionHandle,
     ) -> WorkplaceMember:
         """Attach an employee to a workplace's workforce.
 
@@ -169,10 +185,17 @@ class WorkplaceOperationsService:
             raise NotFoundError(msg, kind="workplace", key=workplace_id)
 
         scope = self._context.scope.resolve(workplace.organization_id)
-        self._require_capability(CapabilityId("workplace.manage"), scope, actor)
+        self._require_capability(
+            CapabilityId("workplace.manage"),
+            scope,
+            execution_handle,
+        )
 
         # Gate J — consume a real core service through the context.
-        employee = self._context.people.get_employee(employee_id)
+        employee = self._context.people.get_employee(
+            employee_id,
+            execution_handle=execution_handle,
+        )
         if employee is None:
             msg = f"employee {employee_id!r} does not exist"
             raise NotFoundError(msg, kind="employee", key=employee_id)
@@ -199,13 +222,13 @@ class WorkplaceOperationsService:
 
         self._audit(
             action="workplace.workforce.added",
-            actor=actor,
             scope=scope,
             details={
                 "workplace_id": workplace_id,
                 "employee_id": employee_id,
                 "membership_id": membership.membership_id,
             },
+            execution_handle=execution_handle,
         )
         self._publish(
             EventId("workplace.workforce.changed"),
@@ -216,8 +239,8 @@ class WorkplaceOperationsService:
                 "member_added": True,
                 "member_removed": False,
                 "membership_id": membership.membership_id,
-                "actor_id": actor,
             },
+            execution_handle,
         )
         return WorkplaceMember(
             membership_id=membership.membership_id,
@@ -232,7 +255,7 @@ class WorkplaceOperationsService:
         self,
         workplace_id: str,
         employee_id: str,
-        actor: str,
+        execution_handle: ExecutionHandle,
     ) -> None:
         """Detach an employee from a workplace's workforce."""
         repo = self._repo()
@@ -242,7 +265,11 @@ class WorkplaceOperationsService:
             raise NotFoundError(msg, kind="workplace", key=workplace_id)
 
         scope = self._context.scope.resolve(workplace.organization_id)
-        self._require_capability(CapabilityId("workplace.manage"), scope, actor)
+        self._require_capability(
+            CapabilityId("workplace.manage"),
+            scope,
+            execution_handle,
+        )
 
         membership = repo.get_membership(workplace_id, employee_id)
         if membership is None:
@@ -253,9 +280,9 @@ class WorkplaceOperationsService:
 
         self._audit(
             action="workplace.workforce.removed",
-            actor=actor,
             scope=scope,
             details={"workplace_id": workplace_id, "employee_id": employee_id},
+            execution_handle=execution_handle,
         )
         delete_payload: dict[str, object] = {
             "workplace_id": workplace_id,
@@ -264,14 +291,17 @@ class WorkplaceOperationsService:
             "member_added": False,
             "member_removed": True,
             "membership_id": membership.membership_id,
-            "actor_id": actor,
             "deleted": True,
         }
-        self._publish(EventId("workplace.workforce.changed"), delete_payload)
+        self._publish(EventId("workplace.workforce.changed"), delete_payload, execution_handle)
 
     # --- queries -----------------------------------------------------------
 
-    def assert_workforce_visible(self, workplace_id: str, actor: str) -> None:
+    def assert_workforce_visible(
+        self,
+        workplace_id: str,
+        execution_handle: ExecutionHandle,
+    ) -> None:
         """Deny workforce reads without ``workplace.view`` (Gate M on a query).
 
         Scope is the organization the workplace belongs to: an actor granted in
@@ -282,25 +312,39 @@ class WorkplaceOperationsService:
             msg = f"workplace {workplace_id!r} does not exist"
             raise NotFoundError(msg, kind="workplace", key=workplace_id)
         scope = self._context.scope.resolve(workplace.organization_id)
-        self._require_capability(CapabilityId("workplace.view"), scope, actor)
+        self._require_capability(
+            CapabilityId("workplace.view"),
+            scope,
+            execution_handle,
+        )
 
     def list_workplaces(
         self,
         organization_id: str | None = None,
         kind: WorkplaceType | None = None,
+        *,
+        execution_handle: ExecutionHandle,
     ) -> list[Workplace]:
         """Workplaces of one organization, optionally filtered by type."""
+        scope = self._context.scope.resolve(organization_id)
+        self._require_capability(CapabilityId("workplace.view"), scope, execution_handle)
         return [
             self._to_workplace(row) for row in self._repo().list_workplaces(organization_id, kind)
         ]
 
-    def list_workforce(self, workplace_id: str) -> list[WorkplaceMember]:
+    def list_workforce(
+        self,
+        workplace_id: str,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> list[WorkplaceMember]:
         """The workforce of one workplace (the workforce view of a workplace)."""
         repo = self._repo()
         workplace = repo.get_workplace(workplace_id)
         if workplace is None:
             msg = f"workplace {workplace_id!r} does not exist"
             raise NotFoundError(msg, kind="workplace", key=workplace_id)
+        self.assert_workforce_visible(workplace_id, execution_handle)
 
         return [
             WorkplaceMember(
@@ -311,10 +355,19 @@ class WorkplaceOperationsService:
                 full_name=_employee_label(employee),
                 employee_number=_employee_number(employee),
             )
-            for row, employee in _with_employee(repo.list_memberships(workplace_id), self._context)
+            for row, employee in _with_employee(
+                repo.list_memberships(workplace_id),
+                self._context,
+                execution_handle,
+            )
         ]
 
-    def resolve_context(self, workplace_id: str) -> WorkplaceContext:
+    def resolve_workplace_context(
+        self,
+        workplace_id: str,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> WorkplaceContext:
         """The ``workplace.context`` for a scope: identity plus workforce size.
 
         Downstream plugins (attendance's module declares it consumes
@@ -326,6 +379,8 @@ class WorkplaceOperationsService:
         if workplace is None:
             msg = f"workplace {workplace_id!r} does not exist"
             raise NotFoundError(msg, kind="workplace", key=workplace_id)
+        scope = self._context.scope.resolve(workplace.organization_id)
+        self._require_capability(CapabilityId("workplace.view"), scope, execution_handle)
 
         return WorkplaceContext(
             workplace_id=workplace.workplace_id,
@@ -337,7 +392,12 @@ class WorkplaceOperationsService:
             workforce_size=len(repo.list_memberships(workplace_id)),
         )
 
-    def workforce_dataset(self, organization_id: str | None) -> DatasetResponse:
+    def workforce_dataset(
+        self,
+        organization_id: str | None,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> DatasetResponse:
         """The workforce as a labelled dataset for Report Studio (Gate O).
 
         Report Studio asks the registry for ``reporting.dataset`` providers and
@@ -346,11 +406,16 @@ class WorkplaceOperationsService:
         plugin maps its richer types down at its own boundary.
         """
         org_id = organization_id or ""
+        scope = self._context.scope.resolve(org_id)
+        self._require_capability(CapabilityId("workplace.view"), scope, execution_handle)
         members: list[tuple[WorkplaceORM, WorkplaceMember]] = []
         repo = self._repo()
         workplaces = repo.list_workplaces(org_id) if org_id else repo.list_workplaces()
         for workplace in workplaces:
-            for member in self.list_workforce(workplace.workplace_id):
+            for member in self.list_workforce(
+                workplace.workplace_id,
+                execution_handle=execution_handle,
+            ):
                 members.append((workplace, member))
 
         columns = (
@@ -380,10 +445,20 @@ def _employee_number(employee: Employee | None) -> str:
 def _with_employee(
     rows: list[WorkforceMembershipORM],
     context: PluginContext,
+    execution_handle: ExecutionHandle,
 ) -> list[tuple[WorkforceMembershipORM, Employee | None]]:
     """Join membership rows to their employees through the core's people port.
 
     One lookup per member, and the join is a core *service call* (Gate J's
     discipline on read paths too) rather than a read of the core's tables.
     """
-    return [(row, context.people.get_employee(row.employee_id)) for row in rows]
+    return [
+        (
+            row,
+            context.people.get_employee(
+                row.employee_id,
+                execution_handle=execution_handle,
+            ),
+        )
+        for row in rows
+    ]

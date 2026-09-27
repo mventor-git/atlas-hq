@@ -4,7 +4,24 @@ A plugin is a Python class subclassing `atlas_sdk.Plugin` that carries a
 `PluginManifest` as a class attribute and is reachable through an
 `atlas.plugins` entry point.
 
-Authority: `contract.md` §5, §12, §13, §16, §17, §18.
+Authority: `contract.md` §5, §12, §13, §16, §17, §18, §38.16.
+
+## Who may be a plugin — trusted in-process code
+
+A plugin is **trusted in-process application code inside the current modular
+monolith**, not a sandboxed extension (`contract.md` §38.16). The `atlas_sdk`
+boundary, the opaque `ExecutionHandle`, plugin-owned-persistence restrictions,
+Core-only policy and role ownership, and a mandatory handle at every public
+entry point stop ordinary and accidental violations. They are not a boundary
+against a hostile adversary: an in-process plugin shares the interpreter and can
+reach module and process state, so no in-process arrangement makes that case
+safe. Low-level Python introspection and deliberately malicious plugin code are
+outside the current threat model and are not claimed, tested, or supported.
+
+Third-party or otherwise untrusted plugins are **not admitted** by this contract.
+Admitting them requires a future out-of-process isolation architecture — separate
+process, enforced capability RPC, no shared interpreter state — which is out of
+scope and is a prerequisite to any change in plugin admission.
 
 ## Manifest fields — the real ones
 
@@ -101,7 +118,7 @@ imported.
 | | Fixed / domain-specific | Composable |
 |---|---|---|
 | Owns | a known domain definition or workflow | no provider implementation names |
-| Example | `construction_reporting` publishing `construction.daily_workforce` through `report.definition` | Report Studio asking every provider for `reporting.dataset` |
+| Example | `construction_reporting` publishing `construction.daily_workforce` through `report.definition`; `self_reporting` publishing `self.monthly.report` | Report Studio asking every provider for `reporting.dataset` |
 | Consumer discovery | `invoker.invoke_all(report.definition, req)`, then match the requested id | `invoker.invoke_all(reporting.dataset, req)` |
 | Allowed? | **yes** (`contract.md` §12) | **required** (`contract.md` §13) |
 

@@ -8,6 +8,8 @@ folder is scanned.
 
 from __future__ import annotations
 
+import tomllib
+from importlib import metadata
 from pathlib import Path
 
 from tests.synthetic import TEST_ENTRY_POINT_GROUP, refresh_metadata_cache, write_distribution
@@ -21,6 +23,27 @@ from atlas_sdk import Plugin, PluginDiscoveryError, PluginManifest
 
 def test_group_name_matches_the_contract() -> None:
     assert PLUGIN_ENTRY_POINT_GROUP == "atlas.plugins"
+
+
+def test_installed_metadata_exposes_every_shipped_plugin() -> None:
+    """``pyproject.toml`` declares plugins; installed metadata is what is read.
+
+    Discovery reads distribution metadata and nothing else, so a stale editable
+    install (metadata generated before a plugin was declared) hides that plugin
+    from the CLI and from the kernel. This fails loudly instead, and it passes
+    on a fresh non-editable CI install where the metadata is generated at build
+    time. Generated metadata is never committed; the fix is to reinstall.
+    """
+    declared = tomllib.loads(
+        (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]["entry-points"][PLUGIN_ENTRY_POINT_GROUP]
+    installed = {
+        entry.name: entry.value
+        for entry in metadata.entry_points(group=PLUGIN_ENTRY_POINT_GROUP)
+        if entry.value.startswith("atlas_plugins.")
+    }
+
+    assert installed == declared
 
 
 def test_discovers_an_installed_distribution(

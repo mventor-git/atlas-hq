@@ -128,6 +128,20 @@ unbinds the contract, so the definition becomes unavailable. Bound definition
 handlers are read-only and must not call `context.transactions.run`; Report
 Studio retains the transaction that commits its audit and outbox event.
 
+`ReportDefinition.use_case` is optional and carries the `UseCaseMetadata` of
+contract §38.1 (`use_case_id`, `title`, `summary`, `owner`, `audience`, `scope`,
+`date_grain`, `required_capabilities`, `surfaces`, `review_status`, `version`).
+A definition without it is a plain dataset shape and keeps working unchanged;
+`construction_reporting` is the example. `self_reporting` declares
+`self.monthly.report` with `scope="self"`, `date_grain="month"`, and surfaces
+web/bot/ai. Schedule metadata is deliberately absent — the first release is
+on-demand.
+
+`ShapedDataset`, `ReportGroup`, and `shape_dataset` live in
+`atlas_sdk.reporting`, so a fixed reporting plugin shapes its own report with the
+same deterministic, column-generic engine Report Studio uses. No plugin reads
+another plugin's table to do it.
+
 Discovery is deterministic and metadata-driven — the registry lookup plus the
 invoker. No table scanning, no field guessing (`contract.md` §14).
 

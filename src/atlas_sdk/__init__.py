@@ -6,7 +6,7 @@ consume core services, publish events or look up contracts is re-exported here.
 
 from __future__ import annotations
 
-from .capability import CapabilityId
+from .capability import CapabilityId, CapabilityKind
 from .command import Command, CommandHandler
 from .context import (
     AssignmentPort,
@@ -46,6 +46,7 @@ from .errors import (
     ScopeError,
 )
 from .event import DomainEvent, EventEnvelope, EventId
+from .execution import ExecutionHandle
 from .manifest import ClusterManifest, ModuleDeclaration, PluginManifest
 from .plugin import Plugin, PluginLifecycle
 from .query import Query, QueryHandler
@@ -60,6 +61,9 @@ from .types import (
     Assignment,
     AttendanceStatus,
     AuditEntry,
+    AuthorizationChannel,
+    AuthorizationDecision,
+    Channel,
     Employee,
     Job,
     Notification,
@@ -68,6 +72,7 @@ from .types import (
     Scope,
     WorkflowCase,
     Workplace,
+    WorkplaceId,
     WorkplaceType,
 )
 
@@ -76,15 +81,19 @@ __version__ = "0.1.0"
 __all__ = [
     "AlreadyRegisteredError",
     "Assignment",
-    "AssignmentPort",
     "AtlasError",
+    "AuthorizationChannel",
+    "AuthorizationDecision",
     "AttendanceStatus",
+    "AssignmentPort",
     "AuditEntry",
     "AuditPort",
     "AuthorizationError",
     "AuthorizationPort",
     "CapabilityId",
+    "CapabilityKind",
     "CapabilityRegistryPort",
+    "Channel",
     "ContractInvokerPort",
     "ContractRegistryPort",
     "DuplicateError",
@@ -101,6 +110,7 @@ __all__ = [
     "DomainEvent",
     "EventDispatcherPort",
     "EventEnvelope",
+    "ExecutionHandle",
     "EventId",
     "EventPublisherPort",
     "EventRegistryPort",
@@ -138,6 +148,7 @@ __all__ = [
     "PluginPersistencePort",
     "TransactionRunnerPort",
     "Workplace",
+    "WorkplaceId",
     "WorkplaceType",
     "WorkflowCase",
     "WorkflowPort",

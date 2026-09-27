@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from tests.conftest import opaque_handle_for_test
 
 from atlas_core.infrastructure.registry import InMemoryContractRegistry, TransactionOwner
 from atlas_sdk import (
@@ -71,6 +72,7 @@ def test_unknown_contract_raises_not_found() -> None:
 
 def test_contract_invocation_commits_exactly_once() -> None:
     registry = InMemoryContractRegistry()
+    registry._set_handle_validator(lambda handle: handle)
     contract_id = ContractId("attendance.daily_summary")
     registry.register(ContractDeclaration(contract_id=contract_id), "attendance")
     registry.bind(contract_id, "attendance", _Handler())
@@ -85,7 +87,10 @@ def test_contract_invocation_commits_exactly_once() -> None:
         TransactionOwner(commit=commit, rollback=lambda: None),
     )
 
-    assert registry.invoke(contract_id, object()) == "handled"
+    assert (
+        registry.invoke(contract_id, object(), execution_handle=opaque_handle_for_test())
+        == "handled"
+    )
     assert commits == 1
 
 
@@ -102,6 +107,7 @@ def test_contract_commit_failure_rolls_back_the_provider_transaction() -> None:
 
     transaction = FailingTransaction()
     registry = InMemoryContractRegistry()
+    registry._set_handle_validator(lambda handle: handle)
     contract_id = ContractId("attendance.daily_summary")
     registry.register(ContractDeclaration(contract_id=contract_id), "attendance")
     registry.bind(contract_id, "attendance", _Handler())
@@ -111,11 +117,11 @@ def test_contract_commit_failure_rolls_back_the_provider_transaction() -> None:
     )
 
     with pytest.raises(RuntimeError, match="commit exploded"):
-        registry.invoke(contract_id, object())
+        registry.invoke(contract_id, object(), execution_handle=opaque_handle_for_test())
 
     assert transaction.rollbacks == 1
 
 
 class _Handler:
-    def handle(self, request: object) -> str:
+    def handle(self, request: object, *, execution_handle) -> str:
         return "handled"

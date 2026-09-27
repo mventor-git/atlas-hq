@@ -14,6 +14,7 @@ from atlas_sdk import (
     CapabilityId,
     Contract,
     ContractId,
+    ExecutionHandle,
     ModuleDeclaration,
     Plugin,
     PluginManifest,
@@ -54,7 +55,12 @@ class ConstructionReportDefinitionContract(Contract[ReportDefinitionRequest, Rep
     def __init__(self) -> None:
         self._definition = CONSTRUCTION_DAILY_WORKFORCE
 
-    def handle(self, request: ReportDefinitionRequest) -> ReportDefinition:
+    def handle(
+        self,
+        request: ReportDefinitionRequest,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> ReportDefinition:
         return self._definition
 
 

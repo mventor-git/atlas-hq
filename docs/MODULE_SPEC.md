@@ -75,7 +75,7 @@ examples — same six-field shape.
 |---|---|---|
 | Module | `manifest.modules[].module_id` | indexed in the plugin registry (via `manifest.module_ids()`) |
 | Contract | `module.provides` + `manifest.provides_contracts` | **invokable** through `context.contracts` / `context.invoker` |
-| Capability | `manifest.provides_capabilities` | checked by `context.authorization.check` |
+| Capability | `manifest.provides_capabilities` | checked by typed `context.authorization.authorize` |
 | Event | `module.publishes` / `module.subscribes` | registered in the event registry, dispatched by the bus |
 
 A module *names* an id; the plugin-level declarations (contracts, capabilities,

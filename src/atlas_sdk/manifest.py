@@ -11,9 +11,10 @@ no orphan plugins.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 
-from .capability import CapabilityId
+from .capability import CapabilityId, CapabilityKind
 from .contract import ContractDeclaration, ContractId
 from .event import EventId
 
@@ -56,6 +57,10 @@ class PluginManifest:
     consumes_contracts: tuple[ContractId, ...] = ()
     publishes_events: tuple[EventId, ...] = ()
     subscribes_events: tuple[EventId, ...] = ()
+    capability_kinds: Mapping[CapabilityId, CapabilityKind] = field(default_factory=dict)
+    #: Physical tables owned by this plugin.  Core checks these names before
+    #: granting the plugin persistence access.
+    owned_tables: tuple[str, ...] = ()
 
     def module_ids(self) -> tuple[str, ...]:
         return tuple(m.module_id for m in self.modules)

@@ -110,6 +110,7 @@ def test_a_plugin_whose_dependency_is_absent_fails_cleanly(
         plugin_name="Payroll",
         cluster_id="cluster.employee_finance",
         requires_plugins=("attendance",),
+        provides_capabilities=("payroll.synthetic",),
     )
     refresh_metadata_cache()
 
@@ -138,6 +139,7 @@ def test_dependencies_are_satisfied_by_a_registered_plugin(
         plugin_id="attendance",
         plugin_name="Attendance",
         cluster_id="cluster.workforce_and_time",
+        provides_capabilities=("attendance.synthetic",),
         publishes_events=("attendance.checked_in",),
     )
     write_distribution(
@@ -149,6 +151,7 @@ def test_dependencies_are_satisfied_by_a_registered_plugin(
         plugin_name="Payroll",
         cluster_id="cluster.employee_finance",
         requires_plugins=("attendance",),
+        provides_capabilities=("payroll.synthetic",),
     )
     refresh_metadata_cache()
 
@@ -175,6 +178,7 @@ def test_boot_retries_a_dependency_discovered_before_its_provider(
         plugin_name="Payroll",
         cluster_id="cluster.employee_finance",
         requires_plugins=("attendance",),
+        provides_capabilities=("payroll.synthetic",),
     )
     attendance_metadata = isolated_plugins / "attendance-metadata"
     attendance_metadata.mkdir()
@@ -318,7 +322,9 @@ def test_context_for_builds_a_plugin_context(
     assert context.plugin_id == "report.studio"
     assert context.people is not None
     assert context.events is not None
-    assert context.contracts is wired.registries.contracts
+    assert context.contracts is not wired.registries.contracts
+    assert hasattr(context.contracts, "bind")
+    assert not hasattr(context.contracts, "_registry")
     assert context.transactions is wired.context_for("report.studio").transactions
     assert not hasattr(context, "unit_of_work")
 

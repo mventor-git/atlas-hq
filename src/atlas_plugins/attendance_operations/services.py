@@ -19,7 +19,6 @@ Three rules this service obeys:
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from typing import Protocol, cast
@@ -31,6 +30,7 @@ from atlas_sdk import (
     DomainEvent,
     Employee,
     EventId,
+    ExecutionHandle,
     NotFoundError,
     Scope,
 )
@@ -60,7 +60,6 @@ class _WorkforceRequest:
     """
 
     workplace_id: str
-    actor_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -68,7 +67,6 @@ class _WorkplaceContextRequest:
     """The request shape of ``workplace.context``, spelled locally."""
 
     workplace_id: str
-    actor_id: str = ""
 
 
 class _WorkforceMember(Protocol):
@@ -98,38 +96,55 @@ class AttendanceOperationsService:
     simpler.
     """
 
-    def __init__(
-        self,
-        context: PluginContext,
-        capability: Callable[[str, Scope, str], bool] | None = None,
-    ) -> None:
+    def __init__(self, context: PluginContext) -> None:
         self._context = context
-        self._capability = capability or context.authorization.check
 
     # --- helpers -----------------------------------------------------------
 
     def _repo(self) -> AttendanceOperationsRepository:
         return AttendanceOperationsRepository(self._context.persistence)
 
-    def _require_capability(self, capability: CapabilityId, scope: Scope, actor: str) -> None:
-        if not self._capability(capability, scope, actor):
-            msg = f"{actor!r} lacks capability {capability} in scope {scope}"
-            raise AuthorizationError(msg)
+    def _require_capability(
+        self,
+        capability: CapabilityId,
+        scope: Scope,
+        execution_handle: ExecutionHandle,
+    ) -> None:
+        decision = self._context.authorization.authorize(execution_handle, capability, scope)
+        if not decision.allowed:
+            raise AuthorizationError(f"attendance operation denied: {decision.code}")
 
-    def _publish(self, event: EventId, payload: dict[str, object]) -> None:
-        self._context.events.publish(DomainEvent(event_id=event, payload=payload))
+    def _publish(
+        self,
+        event: EventId,
+        payload: dict[str, object],
+        execution_handle: ExecutionHandle,
+    ) -> None:
+        self._context.events.publish(
+            DomainEvent(event_id=event, payload=payload),
+            execution_handle=execution_handle,
+        )
 
-    def _audit(self, action: str, actor: str, scope: Scope, details: dict[str, object]) -> str:
+    def _audit(
+        self,
+        action: str,
+        scope: Scope,
+        details: dict[str, object],
+        execution_handle: ExecutionHandle,
+    ) -> str:
         return self._context.audit.record(
             action=action,
-            actor=actor,
-            scope=scope,
             details=details,
+            execution_handle=execution_handle,
         )
 
     # --- cross-plugin reads (Gate K) --------------------------------------
 
-    def _workforce(self, workplace_id: str, actor: str) -> list[_WorkforceMember]:
+    def _workforce(
+        self,
+        workplace_id: str,
+        execution_handle: ExecutionHandle,
+    ) -> list[_WorkforceMember]:
         """A workplace's workforce, through the contract — never a table read.
 
         The provider authorizes the caller itself (``workplace.view`` in the
@@ -138,13 +153,18 @@ class AttendanceOperationsService:
         """
         response = self._context.invoker.invoke(
             WORKPLACE_WORKFORCE_CONTRACT,
-            _WorkforceRequest(workplace_id=workplace_id, actor_id=actor),
+            _WorkforceRequest(workplace_id=workplace_id),
+            execution_handle=execution_handle,
         )
         if not isinstance(response, list):
             return []
         return [cast("_WorkforceMember", member) for member in response]
 
-    def _workplace_organization(self, workplace_id: str) -> str:
+    def _workplace_organization(
+        self,
+        workplace_id: str,
+        execution_handle: ExecutionHandle,
+    ) -> str:
         """Resolve a workplace's organization through the ``workplace.context``.
 
         That contract answers without a capability of its own, which makes it the
@@ -154,6 +174,7 @@ class AttendanceOperationsService:
         response = self._context.invoker.invoke(
             WORKPLACE_CONTEXT_CONTRACT,
             _WorkplaceContextRequest(workplace_id=workplace_id),
+            execution_handle=execution_handle,
         )
         return cast("_WorkplaceContext", response).organization_id
 
@@ -165,7 +186,7 @@ class AttendanceOperationsService:
         workplace_id: str,
         date: date,
         status: AttendanceStatus,
-        actor: str,
+        execution_handle: ExecutionHandle,
     ) -> AttendanceRecord:
         """Record one employee's status at one workplace on one date.
 
@@ -177,18 +198,25 @@ class AttendanceOperationsService:
         """
         # Gate J — consume a real core service through the context, and read the
         # organization the scope is built from off the same answer.
-        employee = self._context.people.get_employee(employee_id)
+        employee = self._context.people.get_employee(
+            employee_id,
+            execution_handle=execution_handle,
+        )
         if employee is None:
             msg = f"employee {employee_id!r} does not exist"
             raise NotFoundError(msg, kind="employee", key=employee_id)
 
         # Gates M/N — fail fast and cheap, before any cross-plugin call.
         scope = self._context.scope.resolve(employee.organization_id)
-        self._require_capability(CapabilityId("attendance.manage"), scope, actor)
+        self._require_capability(
+            CapabilityId("attendance.manage"),
+            scope,
+            execution_handle,
+        )
 
         # Gate K — membership is proven by the workforce contract, not by this
         # plugin reading another plugin's roster table.
-        members = self._workforce(workplace_id, actor)
+        members = self._workforce(workplace_id, execution_handle)
         if not any(member.employee_id == employee_id for member in members):
             msg = (
                 f"employee {employee_id!r} is not a member of the workforce of "
@@ -216,7 +244,6 @@ class AttendanceOperationsService:
         record = _to_record(row, employee)
         self._audit(
             action="attendance.recorded" if created else "attendance.updated",
-            actor=actor,
             scope=scope,
             details={
                 "attendance_id": row.attendance_id,
@@ -226,6 +253,7 @@ class AttendanceOperationsService:
                 "status": status.value,
                 "updated": not created,
             },
+            execution_handle=execution_handle,
         )
         self._publish(
             EventId("attendance.recorded"),
@@ -237,40 +265,67 @@ class AttendanceOperationsService:
                 "date": date.isoformat(),
                 "status": status.value,
                 "updated": not created,
-                "actor_id": actor,
             },
+            execution_handle,
         )
         return record
 
     # --- queries -----------------------------------------------------------
 
-    def assert_summary_visible(self, workplace_id: str, actor: str) -> None:
+    def assert_summary_visible(
+        self,
+        workplace_id: str,
+        execution_handle: ExecutionHandle,
+    ) -> None:
         """Deny a summary read without ``attendance.view`` (Gate M on a query).
 
         Scope is the organization the workplace belongs to, resolved through the
         ``workplace.context`` contract: an actor granted in one org cannot read
         another org's summary (Gate N).
         """
-        organization_id = self._workplace_organization(workplace_id)
+        organization_id = self._workplace_organization(workplace_id, execution_handle)
         scope = self._context.scope.resolve(organization_id)
-        self._require_capability(CapabilityId("attendance.view"), scope, actor)
+        self._require_capability(
+            CapabilityId("attendance.view"),
+            scope,
+            execution_handle,
+        )
 
-    def daily_summary(self, workplace_id: str, date: date) -> DailySummary:
+    def daily_summary(
+        self,
+        workplace_id: str,
+        date: date,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> DailySummary:
         """The statuses recorded for one workplace on one date.
 
         Employee labels come from the core's people port (Gate J's discipline on
         read paths too); the roster itself is not this plugin's to read.
         """
+        self.assert_summary_visible(workplace_id, execution_handle)
         rows = self._repo().list_for_workplace_and_date(workplace_id, date)
         return DailySummary(
             workplace_id=workplace_id,
             date=date,
             entries=tuple(
-                _to_entry(row, self._context.people.get_employee(row.employee_id)) for row in rows
+                _to_entry(
+                    row,
+                    self._context.people.get_employee(
+                        row.employee_id,
+                        execution_handle=execution_handle,
+                    ),
+                )
+                for row in rows
             ),
         )
 
-    def daily_summary_dataset(self, organization_id: str | None) -> DatasetResponse:
+    def daily_summary_dataset(
+        self,
+        organization_id: str | None,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> DatasetResponse:
         """The recorded attendance as a labelled dataset for Report Studio (Gate O).
 
         Report Studio asks the registry for ``reporting.dataset`` providers and
@@ -278,13 +333,27 @@ class AttendanceOperationsService:
         strings: the dataset vocabulary is printable columns and rows, and this
         plugin maps its richer types down at its own boundary.
         """
+        scope = self._context.scope.resolve(organization_id)
+        decision = self._context.authorization.authorize(
+            execution_handle,
+            CapabilityId("attendance.view"),
+            scope,
+        )
+        if not decision.allowed:
+            raise AuthorizationError(f"attendance dataset read denied: {decision.code}")
         rows = self._repo().list_for_organization(organization_id)
         return DatasetResponse(
             dataset_id="attendance.daily_summary",
             title="Attendance Daily Summary",
             columns=("employee_number", "full_name", "attendance_date", "attendance_status"),
             rows=tuple(
-                _dataset_row(row, self._context.people.get_employee(row.employee_id))
+                _dataset_row(
+                    row,
+                    self._context.people.get_employee(
+                        row.employee_id,
+                        execution_handle=execution_handle,
+                    ),
+                )
                 for row in rows
             ),
         )

@@ -11,11 +11,22 @@ from collections.abc import Callable
 from typing import cast
 
 import pytest
+from tests.conftest import (
+    assign_role_for_test,
+    issue_handle_for_test,
+    issue_uow_handle_for_test,
+)
 
 from atlas_core.application.organization import OrganizationService
 from atlas_core.application.people import PeopleService
 from atlas_core.application.unit_of_work import UnitOfWorkPort
-from atlas_core.infrastructure.events import EventDispatcher, OutboxEventPublisher
+from atlas_core.domain.role import (
+    AUDIT_READ,
+    ORGANIZATION_MANAGE,
+    PEOPLE_EMPLOYEE_CREATE,
+    PEOPLE_EMPLOYEE_READ,
+)
+from atlas_core.infrastructure.events import OutboxEventPublisher
 from atlas_core.kernel import Kernel
 from atlas_plugins.atlas_demo import (
     DEMO_GREET,
@@ -25,7 +36,7 @@ from atlas_plugins.atlas_demo import (
     GreetingRequest,
     GreetingResponse,
 )
-from atlas_sdk import AuthorizationError, PluginLifecycle
+from atlas_sdk import AuthorizationError, PluginLifecycle, Scope
 
 ACTOR = "user.demo_admin"
 
@@ -41,22 +52,66 @@ def demo(real_kernel: Kernel, uow_factory: Callable[[], UnitOfWorkPort]) -> Kern
 @pytest.fixture
 def org_with_employee(uow_factory: Callable[[], UnitOfWorkPort]) -> tuple[str, str]:
     with uow_factory() as uow:
-        org = OrganizationService(uow).create_organization(name="Acme", code="ACME")
+        org_handle = issue_uow_handle_for_test(
+            uow_factory,
+            ORGANIZATION_MANAGE,
+            "organization.create",
+            Scope(principal_id="seed.organization"),
+            principal_id="seed.organization",
+        )
+        org = OrganizationService(uow).create_organization(
+            name="Acme", code="ACME", execution_handle=org_handle
+        )
+        employee_handle = issue_uow_handle_for_test(
+            uow_factory,
+            PEOPLE_EMPLOYEE_CREATE,
+            "people.employee.create",
+            Scope(organization_id=org.organization_id),
+        )
         employee = PeopleService(uow, OutboxEventPublisher(uow, publisher="seed")).create_employee(
             full_name="Ada Lovelace",
             employee_number="EMP-1",
             organization_id=org.organization_id,
+            execution_handle=employee_handle,
         )
     return org.organization_id, employee.employee_id
 
 
 def _grant(kernel: Kernel, org_id: str) -> None:
-    """Give the actor the demo capability, through the role the plugin published."""
-    context = kernel.context_for("atlas_demo")
-    context.authorization.grant(ACTOR, "role.demo_greeter", context.scope.resolve(org_id))
+    """Give the actor the demo capability through Core management."""
+    assign_role_for_test(
+        kernel,
+        ACTOR,
+        "role.demo_greeter",
+        kernel.context_for("atlas_demo").scope.resolve(org_id),
+    )
+    kernel.authorization_management.grant_capability(
+        ACTOR,
+        PEOPLE_EMPLOYEE_READ,
+        kernel.context_for("atlas_demo").scope.resolve(org_id),
+        actor="tests",
+    )
+    kernel.authorization_management.grant_capability(
+        ACTOR,
+        AUDIT_READ,
+        kernel.context_for("atlas_demo").scope.resolve(org_id),
+        actor="tests",
+    )
 
 
 # 1. declare itself; 2. declare its cluster; 3. declare one module
+
+
+def _context(kernel: Kernel, org_id: str, *, actor: str = ACTOR, resource_id: str | None = None):
+    return issue_handle_for_test(
+        kernel,
+        actor,
+        DEMO_GREET,
+        "demo.greet",
+        kernel.context_for("atlas_demo").scope.resolve(org_id),
+        resource_id=resource_id,
+        additional_capabilities=(PEOPLE_EMPLOYEE_READ, AUDIT_READ),
+    )
 
 
 def test_the_plugin_declares_itself_and_its_cluster(demo: Kernel) -> None:
@@ -88,7 +143,8 @@ def test_the_plugin_consumes_a_real_core_service(
         "GreetingResponse",
         demo.registries.contracts.invoke(
             DEMO_GREETING_CONTRACT,
-            GreetingRequest(employee_id=employee_id, actor_id=ACTOR, organization_id=org_id),
+            GreetingRequest(employee_id=employee_id, organization_id=org_id),
+            execution_handle=_context(demo, org_id, resource_id=employee_id),
         ),
     )
 
@@ -123,7 +179,8 @@ def test_the_plugin_publishes_an_event(
 
     demo.registries.contracts.invoke(
         DEMO_GREETING_CONTRACT,
-        GreetingRequest(employee_id=employee_id, actor_id=ACTOR, organization_id=org_id),
+        GreetingRequest(employee_id=employee_id, organization_id=org_id),
+        execution_handle=_context(demo, org_id, resource_id=employee_id),
     )
     demo.dispatcher.dispatch_pending()
 
@@ -163,7 +220,8 @@ def test_disable_reenable_rebinds_the_contract_transaction_owner(
         "GreetingResponse",
         demo.registries.contracts.invoke(
             DEMO_GREETING_CONTRACT,
-            GreetingRequest(employee_id=employee_id, actor_id=ACTOR, organization_id=org_id),
+            GreetingRequest(employee_id=employee_id, organization_id=org_id),
+            execution_handle=_context(demo, org_id, resource_id=employee_id),
         ),
     )
 
@@ -173,7 +231,8 @@ def test_disable_reenable_rebinds_the_contract_transaction_owner(
         "GreetingResponse",
         demo.registries.contracts.invoke(
             DEMO_GREETING_CONTRACT,
-            GreetingRequest(employee_id=employee_id, actor_id=ACTOR, organization_id=org_id),
+            GreetingRequest(employee_id=employee_id, organization_id=org_id),
+            execution_handle=_context(demo, org_id, resource_id=employee_id),
         ),
     )
 
@@ -215,13 +274,18 @@ def test_the_plugin_writes_an_audit_record(
         "GreetingResponse",
         demo.registries.contracts.invoke(
             DEMO_GREETING_CONTRACT,
-            GreetingRequest(employee_id=employee_id, actor_id=ACTOR, organization_id=org_id),
+            GreetingRequest(employee_id=employee_id, organization_id=org_id),
+            execution_handle=_context(demo, org_id, resource_id=employee_id),
         ),
     )
 
     from atlas_core.application.audit import AuditService
 
-    records = AuditService(uow_factory()).list_records(organization_id=org_id, limit=20)
+    records = AuditService(uow_factory()).list_records(
+        organization_id=org_id,
+        limit=20,
+        execution_handle=_context(demo, org_id, resource_id=employee_id),
+    )
     ours = [r for r in records if r.audit_id == response.audit_id]
 
     assert len(ours) == 1
@@ -243,7 +307,8 @@ def test_the_plugin_obeys_a_capability(
     with pytest.raises(AuthorizationError):
         demo.registries.contracts.invoke(
             DEMO_GREETING_CONTRACT,
-            GreetingRequest(employee_id=employee_id, actor_id=ACTOR, organization_id=org_id),
+            GreetingRequest(employee_id=employee_id, organization_id=org_id),
+            execution_handle=_context(demo, org_id, resource_id=employee_id),
         )
 
 
@@ -261,13 +326,39 @@ def test_the_plugin_respects_scope(
 ) -> None:
     """Gate N: an actor scoped to one org cannot greet an employee of another."""
     with uow_factory() as uow:
-        org_a = OrganizationService(uow).create_organization(name="A", code="A")
-        org_b = OrganizationService(uow).create_organization(name="B", code="B")
+        org_a = OrganizationService(uow).create_organization(
+            name="A",
+            code="A",
+            execution_handle=issue_uow_handle_for_test(
+                uow_factory,
+                ORGANIZATION_MANAGE,
+                "organization.create",
+                Scope(principal_id="seed.a"),
+                principal_id="seed.a",
+            ),
+        )
+        org_b = OrganizationService(uow).create_organization(
+            name="B",
+            code="B",
+            execution_handle=issue_uow_handle_for_test(
+                uow_factory,
+                ORGANIZATION_MANAGE,
+                "organization.create",
+                Scope(principal_id="seed.b"),
+                principal_id="seed.b",
+            ),
+        )
         publisher = OutboxEventPublisher(uow, publisher="seed")
         employee_b = PeopleService(uow, publisher).create_employee(
             full_name="Grace Hopper",
             employee_number="EMP-B",
             organization_id=org_b.organization_id,
+            execution_handle=issue_uow_handle_for_test(
+                uow_factory,
+                PEOPLE_EMPLOYEE_CREATE,
+                "people.employee.create",
+                Scope(organization_id=org_b.organization_id),
+            ),
         )
 
     _grant(demo, org_a.organization_id)
@@ -277,9 +368,9 @@ def test_the_plugin_respects_scope(
             DEMO_GREETING_CONTRACT,
             GreetingRequest(
                 employee_id=employee_b.employee_id,
-                actor_id=ACTOR,
                 organization_id=org_b.organization_id,
             ),
+            execution_handle=_context(demo, org_a.organization_id),
         )
 
 
@@ -294,5 +385,6 @@ def test_the_dispatcher_is_available_on_the_context(demo: Kernel) -> None:
     """A plugin's context exposes the dispatcher for subscribing (Gate K)."""
     context = demo.context_for("atlas_demo")
 
-    assert isinstance(context.dispatcher, EventDispatcher)
+    assert hasattr(context.dispatcher, "subscribe")
+    assert not hasattr(context.dispatcher, "_dispatcher")
     assert context.invoker is not None

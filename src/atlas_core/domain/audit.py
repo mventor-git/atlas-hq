@@ -21,6 +21,7 @@ class AuditRecord:
     organization_id: str | None = None
     workplace_id: str | None = None
     details: dict[str, object] = field(default_factory=dict)
+    principal_id: str | None = None
 
 
 __all__ = ["AuditRecord"]

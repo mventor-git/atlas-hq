@@ -28,8 +28,8 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      ATLAS_DATABASE_URL: postgresql+psycopg://atlas@localhost:5433/atlas_hq
-      ATLAS_TEST_DATABASE_URL: postgresql+psycopg://atlas@localhost:5433/atlas_hq
+      ATLAS_DATABASE_URL: postgresql+psycopg://atlas@127.0.0.1:5433/atlas_hq
+      ATLAS_TEST_DATABASE_URL: postgresql+psycopg://atlas@127.0.0.1:5433/atlas_hq
       ATLAS_DATABASE_SCHEMA: atlas
     steps:
       - uses: actions/checkout@v4
@@ -52,3 +52,65 @@ jobs:
         run: |
           .venv/bin/python -m atlas_hq.cli boot
           .venv/bin/python -m atlas_hq.cli plugins
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      # The same three commands install.ps1 runs, so CI proves the installer's
+      # path rather than a second one. `--ignore-scripts` means no dependency's
+      # install script runs during an install on npm 10, 11 or 12, and nothing
+      # answers a prompt; only the two names in web/package.json#allowScripts
+      # are then built, by name. The last two commands are the proof: esbuild
+      # reports its version and the oxide addon loads its native binding, so a
+      # rebuild that quietly built nothing fails here instead of in a developer's
+      # first `npm run dev`.
+      - name: Install web dependencies from the lockfile, scripts off
+        working-directory: web
+        run: |
+          npm ci --ignore-scripts
+          npm rebuild esbuild @tailwindcss/oxide
+          ./node_modules/.bin/esbuild --version
+          node -e "require('@tailwindcss/oxide')"
+      - name: Type check the web console
+        working-directory: web
+        run: npm run typecheck
+      - name: Test the web console
+        working-directory: web
+        run: npm run test
+      - name: Build the web console
+        working-directory: web
+        run: npm run build
+
+  # contract.md 40.6: a script that is not validated on Windows is not shippable.
+  # This job is a parse plus a dry run: it starts no server, no container and no
+  # database, it reads no secret, and it needs no tool the runner lacks.
+  windows-scripts:
+    name: Windows scripts (5.1 parse + dry run)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse every PowerShell script
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = 'install.ps1', 'start-demo.ps1', 'tests/windows/verify_scripts.ps1'
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $file).Path, [ref]$tokens, [ref]$errors)
+            if ($errors.Count -gt 0) {
+              # Not `$error`: that is the read-only automatic variable.
+              foreach ($parseError in $errors) {
+                Write-Host "::error file=$file,line=$($parseError.Extent.StartLineNumber)::$($parseError.Message)"
+              }
+              throw "$file does not parse"
+            }
+            Write-Host "[ok] $file parses"
+          }
+      - name: Windows PowerShell 5.1 packaging gate
+        # Section 5 of the gate runs both scripts with -DryRun and asserts the
+        # plan each prints, so the dry runs need no step of their own here.
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests\windows\verify_scripts.ps1

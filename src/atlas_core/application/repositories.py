@@ -7,13 +7,15 @@ application services independent of SQLAlchemy details.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol
 
-from atlas_sdk import EventEnvelope
+from atlas_sdk import CapabilityId, EventEnvelope, Scope
 
 from ..domain.assignment import Assignment
 from ..domain.audit import AuditRecord
 from ..domain.employee import Employee
+from ..domain.execution import PersistedExecution
 from ..domain.identifiers import (
     AssignmentId,
     EmployeeId,
@@ -22,6 +24,16 @@ from ..domain.identifiers import (
 )
 from ..domain.job import Job
 from ..domain.organization import Organization, Workplace
+from ..domain.policy import Policy
+from ..domain.role import (
+    Capability,
+    CapabilityGrant,
+    Confirmation,
+    Principal,
+    PrincipalIdentity,
+    Role,
+    RoleAssignment,
+)
 
 
 class EmployeeRepositoryPort(Protocol):
@@ -61,11 +73,91 @@ class AuditRepositoryPort(Protocol):
     def append(self, record: AuditRecord) -> None:
         """Insert one audit record. Append-only: there is no update or delete."""
 
+    def get(self, audit_id: str) -> AuditRecord | None:
+        """Read one record without exposing mutation operations."""
+        ...
+
     def all(
         self,
         organization_id: str | None = None,
         limit: int = 100,
     ) -> list[AuditRecord]: ...
+
+
+class ExecutionRepositoryPort(Protocol):
+    """Persistent Core-only store for opaque execution handles."""
+
+    def add(self, execution: PersistedExecution) -> None: ...
+    def get(self, token_hash: str) -> PersistedExecution | None: ...
+    def revoke(self, token_hash: str) -> bool: ...
+    def expire_due(self, now: datetime) -> int: ...
+
+
+class PolicyRepositoryPort(Protocol):
+    """Persistent Core-owned policy state."""
+
+    def get(self, policy_id: str) -> Policy | None: ...
+    def list(self) -> list[Policy]: ...
+    def upsert(self, policy: Policy) -> None: ...
+
+
+class AuthorizationRepositoryPort(Protocol):
+    """The single Core-owned authorization persistence seam."""
+
+    def get_principal(self, principal_id: str) -> Principal | None: ...
+    def add_principal(self, principal: Principal) -> None: ...
+    def list_principals(self) -> list[Principal]: ...
+
+    def get_identity(self, identity_id: str) -> PrincipalIdentity | None: ...
+    def find_identity(self, channel: str, external_id: str) -> PrincipalIdentity | None: ...
+    def list_identities(self) -> list[PrincipalIdentity]: ...
+    def add_identity(self, identity: PrincipalIdentity) -> None: ...
+    def update_identity(self, identity: PrincipalIdentity) -> None: ...
+    def link_identity_once(
+        self,
+        identity_id: str,
+        principal_id: str,
+    ) -> PrincipalIdentity | None: ...
+
+    def get_capability(self, capability_id: CapabilityId) -> Capability | None: ...
+    def upsert_capability(self, capability: Capability) -> None: ...
+    def list_capabilities(self, *, active_only: bool = True) -> list[Capability]: ...
+
+    def get_role(self, role_id: str) -> Role | None: ...
+    def upsert_role(self, role: Role) -> None: ...
+    def list_roles(self, *, active_only: bool = True) -> list[Role]: ...
+
+    def add_assignment(self, assignment: RoleAssignment) -> None: ...
+    def revoke_assignment(
+        self,
+        principal_id: str,
+        role_id: str,
+        scope: Scope,
+    ) -> list[RoleAssignment]: ...
+    def assignments_for(self, principal_id: str) -> list[RoleAssignment]: ...
+
+    def add_grant(self, grant: CapabilityGrant) -> None: ...
+    def revoke_grant(
+        self,
+        principal_id: str,
+        capability_id: CapabilityId,
+        scope: Scope,
+    ) -> list[CapabilityGrant]: ...
+    def grants_for(self, principal_id: str) -> list[CapabilityGrant]: ...
+
+    def add_confirmation(self, confirmation: Confirmation) -> None: ...
+    def get_confirmation(self, confirmation_id: str) -> Confirmation | None: ...
+    def consume_confirmation(
+        self,
+        confirmation_id: str,
+        *,
+        principal_id: str | None = None,
+        capability_id: CapabilityId | None = None,
+        action: str | None = None,
+        resource_id: str | None = None,
+        channel: str | None = None,
+        scope: Scope | None = None,
+    ) -> Confirmation | None: ...
 
 
 class OutboxRepositoryPort(Protocol):
@@ -83,9 +175,12 @@ class OutboxRepositoryPort(Protocol):
 __all__ = [
     "AssignmentRepositoryPort",
     "AuditRepositoryPort",
+    "AuthorizationRepositoryPort",
     "EmployeeRepositoryPort",
+    "ExecutionRepositoryPort",
     "JobRepositoryPort",
     "OrganizationRepositoryPort",
     "OutboxRepositoryPort",
+    "PolicyRepositoryPort",
     "WorkplaceRepositoryPort",
 ]

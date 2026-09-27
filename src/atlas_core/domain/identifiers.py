@@ -16,6 +16,7 @@ OrganizationId = NewType("OrganizationId", str)
 WorkplaceId = NewType("WorkplaceId", str)
 JobId = NewType("JobId", str)
 AssignmentId = NewType("AssignmentId", str)
+PrincipalId = NewType("PrincipalId", str)
 
 
 def new_id(prefix: str) -> str:
@@ -28,6 +29,7 @@ __all__ = [
     "EmployeeId",
     "JobId",
     "OrganizationId",
+    "PrincipalId",
     "WorkplaceId",
     "new_id",
 ]

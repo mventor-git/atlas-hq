@@ -27,6 +27,7 @@ from ...domain.identifiers import (
 )
 from ...domain.job import Job, JobStatus
 from ...domain.organization import Organization, Workplace, WorkplaceType
+from .authorization import AuthorizationRepository
 from .orm import (
     AssignmentORM,
     AuditORM,
@@ -211,9 +212,15 @@ class AuditRepository:
                 action=record.action,
                 organization_id=record.organization_id,
                 workplace_id=record.workplace_id,
+                principal_id=record.principal_id,
                 details=record.details,
             ),
         )
+
+    def get(self, audit_id: str) -> AuditRecord | None:
+        self._session.flush()
+        row = self._session.get(AuditORM, audit_id)
+        return _to_audit(row) if row is not None else None
 
     def all(
         self,
@@ -335,6 +342,7 @@ def _to_audit(row: AuditORM) -> AuditRecord:
         action=row.action,
         organization_id=row.organization_id,
         workplace_id=row.workplace_id,
+        principal_id=row.principal_id,
         details=dict(row.details or {}),
     )
 
@@ -357,6 +365,7 @@ def _to_envelope(row: OutboxORM) -> EventEnvelope:
 
 __all__ = [
     "AssignmentRepository",
+    "AuthorizationRepository",
     "AuditRepository",
     "EmployeeRepository",
     "JobRepository",

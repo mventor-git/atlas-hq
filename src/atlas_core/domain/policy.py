@@ -20,6 +20,9 @@ class Policy:
     effective_to: date | None = None
     enabled: bool = True
     condition: Mapping[str, str] = field(default_factory=dict)
+    capability: str | None = None
+    action: str | None = None
+    channel: str | None = None
 
     def is_effective_on(self, on: date) -> bool:
         if not self.enabled:
@@ -29,7 +32,11 @@ class Policy:
         return self.effective_to is None or on <= self.effective_to
 
     def matches(self, facts: Mapping[str, object]) -> bool:
-        return all(str(facts.get(name)) == expected for name, expected in self.condition.items())
+        return all(
+            str(facts.get(name)) == expected
+            for name, expected in self.condition.items()
+            if name != "confirmation_required"
+        )
 
 
 __all__ = ["Policy"]

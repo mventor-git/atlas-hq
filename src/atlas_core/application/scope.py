@@ -18,8 +18,9 @@ class ScopeService(ScopePort):
         self,
         organization_id: str | None,
         workplace_id: str | None = None,
+        principal_id: str | None = None,
     ) -> Scope:
-        return domain_scope.resolve(organization_id, workplace_id)
+        return domain_scope.resolve(organization_id, workplace_id, principal_id)
 
     def narrow(self, requested: Scope, subject: Scope) -> Scope:
         return domain_scope.narrow(requested, subject)

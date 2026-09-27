@@ -8,7 +8,8 @@ services:
       POSTGRES_PASSWORD: atlas
       POSTGRES_DB: atlas_hq
     ports:
-      - "5433:5432"
+      # contract.md 40.3: loopback only. 5433 is the host side, 5432 the container.
+      - "127.0.0.1:5433:5432"
     volumes:
       - atlas_postgres_data:/var/lib/postgresql/data
     healthcheck:

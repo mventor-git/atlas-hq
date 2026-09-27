@@ -1,0 +1,195 @@
+/*
+ * The ONE place a §39 colour value is written down.
+ *
+ * contract.md §39.1 makes the §39.2 table the source of truth and forbids raw
+ * hex in components; §39.8 fixes the variable names the Tailwind/shadcn layer
+ * maps onto it. So this file is the whole mapping, and every other file in
+ * `src/` names tokens only.
+ *
+ * The variable names below are copied verbatim from the §39.8 mapping table, so
+ * `--background` is bg.canvas, `--card` is bg.surface, and so on. Each one
+ * carries its §39.2 token name in a comment, because a name like `--input`
+ * does not say "border.control" on its own.
+ *
+ * The two §39.8 companions with no shadcn primitive behind them are the focus
+ * ring on an accent fill and the non-text success indicator. They are bound to
+ * the §39.2 values rather than to a hex of their own.
+ */
+@import "tailwindcss";
+
+/*
+ * Test files and Markdown are not a source of production classes.
+ *
+ * The focus-ring tests assert that no component sets the two Tailwind outline
+ * colour utilities, and the scanner reads any class-name-shaped string out of
+ * any text file in the tree -- including this comment, the README that
+ * documents the bug, and those tests. Naming the utilities anywhere in prose
+ * was enough to make Tailwind emit them, which put a competing outline colour
+ * back into the sheet and silently re-broke the pairing the base layer below is
+ * built to enforce. So the prose calls them "the outline colour utilities", and
+ * the tests assemble the names they assert on from fragments at runtime.
+ */
+@source not "**/*.test.ts";
+@source not "**/*.test.tsx";
+@source not "**/test/**";
+@source not "**/*.md";
+
+/*
+ * Tailwind resolves the `--color-*` names below into utilities and `theme()`
+ * lookups. The values are `inline`, so a utility emits `var(--background)` and
+ * a theme switch swaps the token underneath without rebuilding the utility.
+ */
+@theme inline {
+  --color-background: var(--background);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-ring: var(--ring);
+  --color-ring-on-accent: var(--focus-ring-on-accent);
+
+  /* A state.* cell is a fill and an ink that are never separated (§39.2). */
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-success-indicator: var(--success-indicator);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-danger: var(--danger);
+  --color-danger-foreground: var(--danger-foreground);
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
+}
+
+/*
+ * §39.2 as resolved values, in §39.8 variable form. Light is the default
+ * (§39.6) and the switch is `data-theme` on <html>, which is what
+ * `src/lib/theme.ts` writes. There is no `.dark` class anywhere.
+ */
+:root,
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --background: #f7f2eb; /* bg.canvas */
+  --card: #eae2d6; /* bg.surface */
+  --border: #eeeeee; /* border.divider -- decorative only, both themes */
+  --input: #757d6f; /* border.control -- every control boundary */
+  --primary: #8b9a6e; /* accent.default */
+  --primary-foreground: #2d0000; /* onAccent.default */
+  --foreground: #2d0000; /* fg.default */
+  --ring: #2d0000; /* focus.ring -- canvas and surface only */
+  --focus-ring-on-accent: #2d0000; /* focus.ring.onAccent -- accent fills only */
+
+  /* The fill is the bare name and the ink is its -foreground, so a component
+     reads both from one state name and cannot pair them with a different fill. */
+  --success: #c7d3c0;
+  --success-foreground: #2d0000;
+  --success-indicator: #2a7c13; /* non-text only; never normal-size text */
+  --warning: #c8a96b;
+  --warning-foreground: #2d0000;
+  --danger: #ffdada;
+  --danger-foreground: #6d0808;
+  --info: #fbe6c2;
+  --info-foreground: #2d0000;
+
+  /*
+   * fg.muted is deliberately not a §39.2 table cell. §39.2 derives it from
+   * fg.default in each theme, requires 4.5:1 on the background it is used on,
+   * and forbids #EEEEEE under any condition. Measured, not eyeballed: 5.55:1 on
+   * bg.canvas and 4.81:1 on bg.surface. Re-checked by src/tokens.test.ts.
+   */
+  --muted-foreground: #785a57;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --background: #41444b;
+  --card: #52575d;
+  --border: #52575d;
+  --input: #dfd8c8;
+  --primary: #cabfab;
+  --primary-foreground: #41444b;
+  --foreground: #dfd8c8;
+  --ring: #dfd8c8;
+  --focus-ring-on-accent: #41444b;
+
+  --success: #c7d3c0;
+  --success-foreground: #2d0000;
+  --success-indicator: #2a7c13;
+  --warning: #c8a96b;
+  --warning-foreground: #2d0000;
+  --danger: #ffdada;
+  --danger-foreground: #6d0808;
+  --info: #fbe6c2;
+  --info-foreground: #2d0000;
+
+  /*
+   * The dark muted ink is *lighter* than fg.default, which looks backwards and
+   * is not: the dark surface #52575D gives fg.default only 5.14:1, so the only
+   * way to stay above 4.5:1 there is to lift away from the surface. Measured
+   * 7.13:1 on bg.canvas and 5.33:1 on bg.surface.
+   */
+  --muted-foreground: #e2dcce;
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html {
+    background-color: var(--background);
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family:
+      ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+      sans-serif;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /*
+   * §39.5: every interactive control shows a visible focus indicator at 3:1.
+   *
+   * The whole indicator is owned here and by no component. That is the point:
+   * a control cannot forget to pick a ring, and a call site cannot override
+   * the token with a utility, because utilities never set an outline colour in
+   * this codebase. `focus.ring` is the default on canvas and surface.
+   */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+
+  /*
+   * An accent-filled control must draw focus.ring.onAccent instead, and
+   * §39.3 forbids focus.ring on an accent fill in the dark theme at 1.28:1.
+   *
+   * The two selectors carry the fix: `[data-on-accent]:focus-visible` has one
+   * more attribute selector than the bare `:focus-visible` above, so the
+   * onAccent ring wins by specificity rather than by source order. A control
+   * opts in by carrying `data-on-accent`, which is the same attribute the
+   * Button, the active nav link, and the skip link already use to say "this is
+   * filled with accent.default".
+   */
+  [data-on-accent]:focus-visible,
+  [data-on-accent] :focus-visible {
+    outline-color: var(--focus-ring-on-accent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -19,8 +19,11 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
 from atlas_sdk import (
+    CapabilityId,
+    CapabilityKind,
     ContractId,
     EventId,
+    ExecutionHandle,
     NotFoundError,
     Plugin,
     PluginDependencyError,
@@ -32,12 +35,14 @@ from atlas_sdk.context import PluginContext
 
 from .application.assignments import AssignmentsService
 from .application.audit import AuditService
-from .application.authorization import AuthorizationService
+from .application.authorization import AuthorizationService, PluginAuthorizationAdapter
 from .application.jobs import JobsService
+from .application.management import AuthorizationManagementService
 from .application.notification import NotificationService
 from .application.organization import OrganizationService
 from .application.people import PeopleService
-from .application.policy import PolicyService
+from .application.policy import PolicyService, ReadOnlyPolicyAdapter
+from .application.public_service import public_service
 from .application.scheduling import SchedulingService
 from .application.scope import ScopeService
 from .application.unit_of_work import UnitOfWorkPort
@@ -111,12 +116,92 @@ class Kernel:
         self._transaction_owners: dict[str, TransactionOwner] = {}
         #: Shared, stateful services. A plugin registers a role at initialize and
         #: a later context must see it, so these live on the kernel, not per call.
-        self._authorization = AuthorizationService()
         self._scope = ScopeService()
         self._policy = PolicyService()
+        self._authorization = AuthorizationService(
+            policy=self._policy,
+            uow_factory=uow_factory,
+        )
+        # Every contract bound by a running Kernel is a production boundary;
+        # registry-only low-level registries may opt out for metadata tests.
+        self.registries.contracts.require_execution_handle()
         self._workflow = WorkflowService()
         self._notification = NotificationService()
         self._scheduling = SchedulingService()
+        self._authorization_management: AuthorizationManagementService | None = None
+        self.registries.contracts._set_handle_validator(self._validate_execution_handle)
+
+    @property
+    def authorization_management(self) -> AuthorizationManagementService:
+        """Core-only persistent management boundary; never placed in PluginContext."""
+        if self.uow_factory is None:
+            msg = "authorization management requires a PostgreSQL UoW factory"
+            raise RuntimeError(msg)
+        if self._authorization_management is None:
+            self._authorization_management = AuthorizationManagementService(
+                uow_factory=self.uow_factory,
+                authorization=self._authorization,
+            )
+        return self._authorization_management
+
+    def issue_execution_handle(
+        self,
+        *,
+        principal_id: str,
+        capability: CapabilityId,
+        action: str,
+        scope,
+        channel,
+        resource_id: str | None = None,
+        identity_id: str | None = None,
+        policy_context: Mapping[str, object] | None = None,
+        additional_capabilities: tuple[CapabilityId, ...] = (),
+        ttl_seconds: int = 15 * 60,
+    ) -> ExecutionHandle:
+        """Issue a durable opaque handle from a trusted local/server boundary."""
+        if self.uow_factory is None:
+            raise RuntimeError("ExecutionHandle issuance requires a PostgreSQL UoW factory")
+        uow = self.uow_factory()
+        try:
+            policy = self._policy.bind_uow(uow)
+            authorization = self._authorization.for_uow(uow, policy=policy)
+            return authorization.issue_handle(
+                principal_id=principal_id,
+                capability=capability,
+                action=action,
+                scope=scope,
+                channel=channel,
+                resource_id=resource_id,
+                identity_id=identity_id,
+                policy_context=policy_context,
+                additional_capabilities=additional_capabilities,
+                ttl_seconds=ttl_seconds,
+            )
+        finally:
+            uow.close()
+
+    def resolve_execution_handle(self, handle: ExecutionHandle):
+        """Resolve a handle against a fresh persistent Core view."""
+        if self.uow_factory is None:
+            raise RuntimeError("ExecutionHandle resolution requires a PostgreSQL UoW factory")
+        uow = self.uow_factory()
+        try:
+            policy = self._policy.bind_uow(uow)
+            authorization = self._authorization.for_uow(uow, policy=policy)
+            return authorization.resolve_handle(handle)
+        finally:
+            uow.close()
+
+    def revoke_execution_handle(self, handle: ExecutionHandle) -> bool:
+        if self.uow_factory is None:
+            raise RuntimeError("ExecutionHandle revocation requires a PostgreSQL UoW factory")
+        uow = self.uow_factory()
+        try:
+            policy = self._policy.bind_uow(uow)
+            authorization = self._authorization.for_uow(uow, policy=policy)
+            return authorization.revoke_handle(handle)
+        finally:
+            uow.close()
 
     # --- construction -----------------------------------------------------
 
@@ -137,6 +222,22 @@ class Kernel:
             return cached
         uow = self._require_uow_factory()()
         transactions = SqlTransactionRunner(uow)
+        allowed_capabilities: frozenset[CapabilityId] | None = None
+        declared_capability_kinds = None
+        owned_tables: tuple[str, ...] = ()
+        if self.registries.plugins.exists(plugin_id):
+            manifest = self.registries.plugins.get(plugin_id)
+            allowed_capabilities = frozenset(manifest.provides_capabilities)
+            declared_capability_kinds = manifest.capability_kinds
+            owned_tables = manifest.owned_tables
+        policy = self._policy.bind_uow(uow)
+        authorization = self._authorization.for_uow(
+            uow,
+            plugin_id=plugin_id,
+            allowed_capabilities=allowed_capabilities,
+            declared_capability_kinds=declared_capability_kinds,
+            policy=policy,
+        )
         # Cache the owner with the context; publish it only after enable
         # prerequisites succeed.
         owner = TransactionOwner(
@@ -145,28 +246,88 @@ class Kernel:
             poison=uow.poison,
         )
         self._transaction_owners[plugin_id] = owner
-        publisher = OutboxEventPublisher(uow, publisher=plugin_id)
+        resolver = authorization._handle_resolver
+        if resolver is None:
+            raise RuntimeError("plugin context requires a Core ExecutionHandle resolver")
+        publisher = OutboxEventPublisher(
+            uow,
+            publisher=plugin_id,
+            resolver=resolver,
+        )
         context = PluginContext(
             plugin_id=plugin_id,
-            people=PeopleService(uow, publisher),
-            organization=OrganizationService(uow),
-            jobs=JobsService(uow),
-            assignments=AssignmentsService(uow, publisher),
-            authorization=self._authorization,
+            people=public_service(
+                PeopleService(
+                    uow,
+                    publisher,
+                    resolver=resolver,
+                    authorization=authorization,
+                )
+            ),
+            organization=public_service(
+                OrganizationService(
+                    uow,
+                    resolver=resolver,
+                    authorization=authorization,
+                )
+            ),
+            jobs=public_service(
+                JobsService(
+                    uow,
+                    resolver=resolver,
+                    authorization=authorization,
+                )
+            ),
+            assignments=public_service(
+                AssignmentsService(
+                    uow,
+                    publisher,
+                    resolver=resolver,
+                    authorization=authorization,
+                )
+            ),
+            authorization=public_service(PluginAuthorizationAdapter(authorization)),
             scope=self._scope,
-            policy=self._policy,
-            audit=AuditService(uow),
-            workflow=self._workflow,
-            notification=self._notification,
-            scheduling=self._scheduling,
-            events=publisher,
-            dispatcher=self.dispatcher,
-            invoker=_ContractInvoker(self.registries.contracts),
-            capabilities=self.registries.capabilities,
-            contracts=self.registries.contracts,
-            events_registry=self.registries.events,
-            persistence=uow.persistence,
-            transactions=transactions,
+            policy=public_service(ReadOnlyPolicyAdapter(authorization)),
+            audit=public_service(
+                AuditService(
+                    uow,
+                    resolver=resolver,
+                    authorization=authorization,
+                )
+            ),
+            workflow=public_service(
+                WorkflowService(
+                    resolver=resolver,
+                    authorization=authorization,
+                )
+            ),
+            notification=public_service(
+                NotificationService(
+                    resolver=resolver,
+                    authorization=authorization,
+                )
+            ),
+            scheduling=public_service(
+                SchedulingService(
+                    resolver=resolver,
+                    authorization=authorization,
+                )
+            ),
+            events=public_service(publisher),
+            dispatcher=public_service(
+                self.dispatcher.for_plugin(
+                    plugin_id,
+                    resolver=resolver,
+                    authorization=authorization,
+                )
+            ),
+            invoker=public_service(_ContractInvoker(self.registries.contracts)),
+            capabilities=public_service(_PluginCapabilityRegistry(self.registries.capabilities)),
+            contracts=public_service(_PluginContractRegistry(self.registries.contracts)),
+            events_registry=public_service(_PluginEventRegistry(self.registries.events)),
+            persistence=public_service(uow.plugin_persistence(plugin_id, owned_tables)),
+            transactions=public_service(transactions),
         )
         self._contexts[plugin_id] = context
         return context
@@ -267,7 +428,7 @@ class Kernel:
         try:
             subscriptions = instance.bind_subscriptions()
             for event_id, subscriber in subscriptions.items():
-                self.dispatcher.subscribe(event_id, subscriber)
+                self.dispatcher._register(event_id, subscriber, owner=plugin_id)
         except BaseException as exc:  # noqa: BLE001 - plugin hooks may be cancelled
             self._cleanup_enable(plugin_id, subscriptions, exc)
             self._mark_failed(plugin_id, exc)
@@ -367,7 +528,7 @@ class Kernel:
             error.add_note(f"contract cleanup failed: {cleanup_error!r}")
         for event_id, subscriber in subscriptions.items():
             try:
-                self.dispatcher.unsubscribe(event_id, subscriber)
+                self.dispatcher._remove(event_id, subscriber, owner=plugin_id)
             except BaseException as cleanup_error:
                 error.add_note(f"subscription cleanup failed: {cleanup_error!r}")
         self._rollback_cached_context(plugin_id, error)
@@ -389,7 +550,7 @@ class Kernel:
     def _tear_down(self, plugin_id: str, subscriptions: Mapping[EventId, EventSubscriber]) -> None:
         self.registries.contracts.unbind(plugin_id)
         for event_id, subscriber in subscriptions.items():
-            self.dispatcher.unsubscribe(event_id, subscriber)
+            self.dispatcher._remove(event_id, subscriber, owner=plugin_id)
 
     # --- boot stages ------------------------------------------------------
 
@@ -425,12 +586,33 @@ class Kernel:
 
         for capability in manifest.provides_capabilities:
             self.registries.capabilities.register(capability, manifest.plugin_id)
+            self._authorization.register_capability(
+                capability,
+                manifest.capability_kinds.get(capability, CapabilityKind.VIEW),
+                provider_id=manifest.plugin_id,
+            )
+            self._ensure_capability_policy(capability)
         for declaration in manifest.provides_contracts:
             self.registries.contracts.register(declaration, manifest.plugin_id)
         for event in manifest.publishes_events:
             self.registries.events.register_published(event, manifest.plugin_id)
         for event in manifest.subscribes_events:
             self.registries.events.register_subscribed(event, manifest.plugin_id)
+
+    def _ensure_capability_policy(self, capability: CapabilityId) -> None:
+        if self.uow_factory is None:
+            self._policy.register_default(capability)
+            return
+        uow = self.uow_factory()
+        try:
+            policy = self._policy.bind_uow(uow)
+            policy.register_default(capability)
+            uow.commit()
+        except BaseException:
+            uow.rollback()
+            raise
+        finally:
+            uow.close()
 
     def _mark_failed(self, plugin_id: str, exc: BaseException) -> None:
         reason = f"{type(exc).__name__}: {exc}"
@@ -466,11 +648,85 @@ class Kernel:
 
     # --- helpers ----------------------------------------------------------
 
+    def _validate_execution_handle(self, handle: ExecutionHandle) -> object:
+        if self.uow_factory is None:
+            raise RuntimeError("contract handles require a persistent PostgreSQL UoW")
+        return self.resolve_execution_handle(handle)
+
     def _require_uow_factory(self) -> Callable[[], UnitOfWorkPort]:
         if self.uow_factory is None:
             msg = "this kernel was built without a unit-of-work factory"
             raise RuntimeError(msg)
         return self.uow_factory
+
+
+class _PluginCapabilityRegistry:
+    """Read-only capability metadata facade for plugin contexts."""
+
+    def __init__(self, registry: InMemoryCapabilityRegistry) -> None:
+        self._registry = registry
+
+    def all(self):
+        return self._registry.all()
+
+    def exists(self, capability: CapabilityId) -> bool:
+        return self._registry.exists(capability)
+
+    def providers_of(self, capability: CapabilityId):
+        return self._registry.providers_of(capability)
+
+    def provided_by(self, plugin_id: str):
+        return self._registry.provided_by(plugin_id)
+
+
+class _PluginEventRegistry:
+    """Read-only event metadata facade for plugin contexts."""
+
+    def __init__(self, registry: InMemoryEventRegistry) -> None:
+        self._registry = registry
+
+    def all(self):
+        return self._registry.all()
+
+    def exists(self, event_id: EventId) -> bool:
+        return self._registry.exists(event_id)
+
+    def publishers_of(self, event_id: EventId):
+        return self._registry.publishers_of(event_id)
+
+    def subscribers_of(self, event_id: EventId):
+        return self._registry.subscribers_of(event_id)
+
+    def published_by(self, plugin_id: str):
+        return self._registry.published_by(plugin_id)
+
+    def subscribed_by(self, plugin_id: str):
+        return self._registry.subscribed_by(plugin_id)
+
+
+class _PluginContractRegistry:
+    """Plugin-facing contract binding facade; Core retains the live registry."""
+
+    def __init__(self, registry: InMemoryContractRegistry) -> None:
+        self._registry = registry
+
+    def bind(self, contract_id: ContractId, plugin_id: str, instance: object) -> None:
+        self._registry.bind(contract_id, plugin_id, instance)
+
+    def get(self, contract_id: ContractId):
+        return self._registry.get(contract_id)
+
+    def exists(self, contract_id: ContractId) -> bool:
+        return self._registry.exists(contract_id)
+
+    def all(self):
+        return self._registry.all()
+
+    def implementations_of(self, contract_id: ContractId):
+        return self._registry.implementations_of(contract_id)
+
+    def provided_by(self, plugin_id: str):
+        return self._registry.provided_by(plugin_id)
 
 
 @dataclass(frozen=True)
@@ -484,11 +740,31 @@ class _ContractInvoker:
 
     registry: InMemoryContractRegistry
 
-    def invoke(self, contract_id: ContractId, request: object) -> object:
-        return self.registry.invoke(contract_id, request)
+    def invoke(
+        self,
+        contract_id: ContractId,
+        request: object,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> object:
+        return self.registry.invoke(
+            contract_id,
+            request,
+            execution_handle=execution_handle,
+        )
 
-    def invoke_all(self, contract_id: ContractId, request: object) -> list[object]:
-        return self.registry.invoke_all(contract_id, request)
+    def invoke_all(
+        self,
+        contract_id: ContractId,
+        request: object,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> list[object]:
+        return self.registry.invoke_all(
+            contract_id,
+            request,
+            execution_handle=execution_handle,
+        )
 
 
 def _noop_uow() -> UnitOfWorkPort:

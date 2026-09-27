@@ -14,6 +14,7 @@ from typing import Protocol
 from .capability import CapabilityId
 from .contract import ContractDeclaration, ContractId, ContractImplementation
 from .event import EventId
+from .execution import ExecutionHandle
 from .manifest import ClusterManifest, PluginManifest
 from .plugin import PluginLifecycle
 
@@ -85,13 +86,21 @@ class ContractRegistryPort(Protocol):
         """Detach every contract of a plugin that is no longer enabled."""
         ...
 
-    def invoke(self, contract_id: ContractId, request: object) -> object:
-        """Call the single bound implementation of ``contract_id``."""
-        ...
+    def invoke(
+        self,
+        contract_id: ContractId,
+        request: object,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> object: ...
 
-    def invoke_all(self, contract_id: ContractId, request: object) -> list[object]:
-        """Call every bound implementation, in registration order."""
-        ...
+    def invoke_all(
+        self,
+        contract_id: ContractId,
+        request: object,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> list[object]: ...
 
 
 class EventRegistryPort(Protocol):

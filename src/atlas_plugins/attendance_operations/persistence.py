@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 
-from sqlalchemy import MetaData, String, UniqueConstraint, select
+from sqlalchemy import MetaData, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from atlas_sdk import PluginPersistencePort
@@ -81,7 +81,7 @@ class AttendanceOperationsRepository:
         DDL runs on a short-lived engine connection that closes immediately,
         rather than retaining the shared transaction session.
         """
-        self._persistence.create_schema(Base.metadata)
+        self._persistence.create_tables(AttendanceORM)
 
     # --- records -----------------------------------------------------------
 
@@ -94,29 +94,28 @@ class AttendanceOperationsRepository:
         employee_id: str,
         record_date: date,
     ) -> AttendanceORM | None:
-        stmt = select(AttendanceORM).where(
-            AttendanceORM.workplace_id == workplace_id,
-            AttendanceORM.employee_id == employee_id,
-            AttendanceORM.record_date == record_date,
+        return self._persistence.find(
+            AttendanceORM,
+            workplace_id=workplace_id,
+            employee_id=employee_id,
+            record_date=record_date,
         )
-        return next(iter(self._persistence.query(stmt)), None)
 
     def list_for_workplace_and_date(
         self,
         workplace_id: str,
         record_date: date,
     ) -> list[AttendanceORM]:
-        stmt = select(AttendanceORM).where(
-            AttendanceORM.workplace_id == workplace_id,
-            AttendanceORM.record_date == record_date,
+        return self._persistence.all(
+            AttendanceORM,
+            workplace_id=workplace_id,
+            record_date=record_date,
         )
-        return list(self._persistence.query(stmt))
 
     def list_for_organization(self, organization_id: str | None) -> list[AttendanceORM]:
-        stmt = select(AttendanceORM)
-        if organization_id is not None:
-            stmt = stmt.where(AttendanceORM.organization_id == organization_id)
-        return list(self._persistence.query(stmt))
+        if organization_id is None:
+            return self._persistence.all(AttendanceORM)
+        return self._persistence.all(AttendanceORM, organization_id=organization_id)
 
 
 __all__ = [

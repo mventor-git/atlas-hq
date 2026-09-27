@@ -21,7 +21,8 @@ Version: {version}
 
 #: An entry-point group no real distribution advertises. Tests that want a
 #: registry containing only their synthetic plugin boot the kernel against this
-#: group; the eight real plugins stay invisible to them (contract section 17:
+#:     group; the nine real plugins stay invisible to them (contract section 17:
+
 #: isolation is by entry point, not by folder).
 TEST_ENTRY_POINT_GROUP = "atlas.test.plugins"
 
@@ -70,8 +71,12 @@ class _Handler:
     def __init__(self, context):
         self.context = context
 
-    def handle(self, request):
-        return {{"echo": request, "plugin_id": self.context.plugin_id}}
+    def handle(self, request, *, execution_handle):
+        return {{
+            "echo": request,
+            "plugin_id": self.context.plugin_id,
+            "handle_received": True,
+        }}
 """
 
 

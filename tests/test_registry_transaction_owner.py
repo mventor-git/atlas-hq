@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from tests.conftest import opaque_handle_for_test
 
 from atlas_core.infrastructure.registry import InMemoryContractRegistry, TransactionOwner
 from atlas_sdk import ContractDeclaration, ContractId
@@ -22,7 +23,7 @@ class _StatefulHandler:
         self.poisoned = False
         self.operation_error: BaseException | None = None
 
-    def handle(self, request: str) -> str:
+    def handle(self, request: str, *, execution_handle) -> str:
         if self.operation_error is not None:
             raise self.operation_error
         if request == "cancel":
@@ -53,6 +54,7 @@ class _StatefulHandler:
 def _registry(handler: _StatefulHandler) -> tuple[InMemoryContractRegistry, ContractId]:
     contract_id = ContractId("test.write")
     registry = InMemoryContractRegistry()
+    registry._set_handle_validator(lambda handle: handle)
     registry.register(ContractDeclaration(contract_id=contract_id), "provider")
     registry.bind(contract_id, "provider", handler)
     registry.register_transaction_owner(
@@ -71,11 +73,14 @@ def test_base_exception_rolls_back_and_a_later_success_commits_cleanly() -> None
     registry, contract_id = _registry(handler)
 
     with pytest.raises(_Cancellation, match="cancelled"):
-        registry.invoke(contract_id, "cancel")
+        registry.invoke(contract_id, "cancel", execution_handle=opaque_handle_for_test())
 
     assert handler.pending == []
     assert handler.rollbacks == 1
-    assert registry.invoke(contract_id, "write") == "written"
+    assert (
+        registry.invoke(contract_id, "write", execution_handle=opaque_handle_for_test())
+        == "written"
+    )
     assert handler.committed == ["written"]
 
 
@@ -87,13 +92,13 @@ def test_rollback_failure_does_not_mask_the_operation_error() -> None:
     handler.operation_error = error
 
     with pytest.raises(RuntimeError) as caught:
-        registry.invoke(contract_id, "write")
+        registry.invoke(contract_id, "write", execution_handle=opaque_handle_for_test())
 
     assert caught.value is error
     assert any("rollback exploded" in note for note in caught.value.__notes__)
     handler.operation_error = None
     with pytest.raises(RuntimeError, match="poisoned"):
-        registry.invoke(contract_id, "write")
+        registry.invoke(contract_id, "write", execution_handle=opaque_handle_for_test())
     assert handler.committed == []
 
 
@@ -104,7 +109,7 @@ def test_rollback_failure_does_not_mask_the_commit_error() -> None:
     registry, contract_id = _registry(handler)
 
     with pytest.raises(RuntimeError, match="commit exploded") as caught:
-        registry.invoke(contract_id, "write")
+        registry.invoke(contract_id, "write", execution_handle=opaque_handle_for_test())
 
     assert caught.value.args == ("commit exploded",)
     assert any("rollback exploded" in note for note in caught.value.__notes__)

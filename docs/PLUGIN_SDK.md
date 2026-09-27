@@ -36,7 +36,7 @@ needs to understand the SDK, not every core file.
 | Command/Query | `Command`, `CommandHandler`, `Query`, `QueryHandler` |
 | Registries | `PluginRegistryPort`, `ClusterRegistryPort`, `CapabilityRegistryPort`, `ContractRegistryPort`, `EventRegistryPort` |
 | Value types | `Employee`, `Organization`, `Workplace`, `Job`, `Assignment`, `AuditEntry`, `WorkflowCase`, `Notification`, `ScheduledJob`, `Scope`, `WorkplaceType` |
-| Reporting vocabulary | `atlas_sdk.reporting`: `REPORT_DATASET_CONTRACT`, `REPORT_DATASET_DECLARATION`, `DatasetRequest`, `DatasetResponse`, `REPORT_DEFINITION_CONTRACT`, `REPORT_DEFINITION_DECLARATION`, `ReportDefinitionRequest`, `ColumnFilter`, `ReportDefinition` |
+| Reporting vocabulary | `atlas_sdk.reporting`: `REPORT_DATASET_CONTRACT`, `REPORT_DATASET_DECLARATION`, `DatasetRequest`, `DatasetResponse`, `REPORT_DEFINITION_CONTRACT`, `REPORT_DEFINITION_DECLARATION`, `ReportDefinitionRequest`, `ColumnFilter`, `ReportDefinition`, `UseCaseMetadata`, `ShapedDataset`, `ReportGroup`, `shape_dataset` |
 | Errors | see below |
 
 ## PluginContext — the one handle a plugin receives
@@ -87,9 +87,9 @@ owner. Never call `context.transactions.run` inside a bound handler.
 | `OrganizationPort` | `create_organization`, `get_organization`, `add_workplace`, `list_workplaces` | real, persisted |
 | `JobsPort` | `create_job`, `get_job`, `list_jobs` | real, persisted |
 | `AssignmentPort` | `assign`, `get_assignment`, `assignments_for` | real, persisted |
-| `AuthorizationPort` | `check`, `grant`, `register_role` | real, in-memory |
+| `AuthorizationPort` | `authorize`, `register_capability`, `register_role`, `resolve_identity`, `resolve_principal` | typed Core decision plus plugin-owned metadata declarations; Core owns all grants/assignments |
 | `ScopePort` | `resolve`, `narrow` | real, in-memory |
-| `PolicyPort` | `register`, `evaluate` | real, in-memory |
+| `PolicyPort` | `evaluate` | read-only; Core owns policy registration; rules are persisted in PostgreSQL |
 | `AuditPort` | `record`, `list_records` | real, persisted, append-only |
 | `WorkflowPort` | `define`, `start`, `transition`, `get_case` | **skeleton** — in-memory state machine |
 | `NotificationPort` | `send`, `list_sent` | **skeleton** — in-memory out-tray |
@@ -97,7 +97,7 @@ owner. Never call `context.transactions.run` inside a bound handler.
 | `EventPublisherPort` | `publish` | real, outbox-backed |
 | `EventDispatcherPort` | `subscribe`, `unsubscribe` | real, in-process |
 | `ContractInvokerPort` | `invoke`, `invoke_all` | real, registry-backed |
-| `PluginPersistencePort` | `add`, `delete`, `get`, `query`, `create_schema` | real, restricted |
+| `PluginPersistencePort` | `add`, `delete`, `get`, `find`, `all`, `create_tables` | real, restricted: plugin-owned tables only, no raw session, no query, no Core table |
 | `TransactionRunnerPort` | `run` | real, platform-owned direct-call seam |
 
 Ports are `Protocol`s owned by the SDK; `atlas_core` provides every
@@ -125,10 +125,25 @@ Core maps its rich domain entities to these at the application-service boundary
 class Scope:
     organization_id: str | None = None
     workplace_id: str | None = None
+    principal_id: str | None = None
 
     @property
-    def is_empty(self) -> bool: ...  # organization_id is None ⇒ "no access"
+    def is_empty(self) -> bool: ...  # both organization and principal are absent
 ```
+
+`principal_id` is the strict self boundary used by self-scoped report actions.
+A plugin can read `Scope`, but it cannot grant or widen it.
+
+A self-scoped read cannot know *whose* rows it may return, because the
+`ExecutionHandle` is opaque. It asks Core one narrow question —
+`context.authorization.resolve_principal(handle)` — which returns the principal
+Core resolved from the canonical record, or `None` for a missing, unknown,
+expired, or revoked handle. It returns that identifier and nothing else: no
+scope, channel, action, capability set, or policy context. The identifier is
+only a *narrowing* input; the read is still allowed by
+`context.authorization.authorize(handle, capability, self_scope)`, which
+re-checks handle containment, effective grants, policy, channel, and default
+deny. `self_reporting` (contract §38.6) is the reference implementation.
 
 `scope.narrow(requested, subject)` intersects what an operation wants with what
 an actor may see; the result never grants more than `subject`, and disjoint
@@ -142,21 +157,58 @@ scopes yield an empty scope rather than an error.
 `people.employee.create`, `demo.greet`, `report.render`.
 
 ```python
-# at initialize — publish the role that carries your capability
+# at initialize — declare a role owned by this plugin; this is metadata only
 context.authorization.register_role(
     "role.demo_greeter", "Demo Greeter", frozenset({CapabilityId("demo.greet")})
 )
 
-# at runtime — check before acting
-if not context.authorization.check(MY_CAP, scope, actor_id):
-    raise AuthorizationError(...)
+Every public runtime boundary carries a Core-issued opaque `ExecutionHandle`.
+The SDK exposes no principal, channel, action, resource, scope, or policy
+fields on the handle; request payloads cannot replace those canonical facts.
+
+# at runtime — use the typed Core decision; the legacy bool facade is not
+# exposed on PluginContext.
+decision = context.authorization.authorize(
+    handle,
+    MY_CAP,
+    scope,
+)
+if not decision.allowed:
+    raise AuthorizationError(decision.reason)
 ```
 
-A capability is useless until a role carrying it exists and is granted to a
-subject in a scope. Platform roles in `atlas_core/domain/role.py`:
-`role.hr_admin`, `role.manager`, `role.employee`, `role.platform`. Plugin roles
-are registered at initialize time (e.g. `role.demo_greeter`,
-`role.report_renderer`).
+A capability is useless until Core management grants it directly or assigns a
+Core-owned role in a scope. Plugins cannot grant, revoke, or assign permissions;
+`AuthorizationManagementPort` is intentionally absent from `PluginContext`.
+Plugin roles may declare only capabilities owned by the same plugin and cannot
+overwrite another plugin's or Core's role.
+
+For web, Telegram, AI, or a later channel, use the same Core decision seam. It
+fails closed unless the caller supplies an authenticated identity, an enabled
+channel/action, and a policy that evaluates true:
+
+For web, Telegram, AI, or a later channel, use the same typed Core seam:
+
+```python
+decision = context.authorization.authorize(
+    handle,
+    MY_CAP,
+    scope,
+)
+if not decision.allowed:
+    raise AuthorizationError(decision.reason)
+```
+
+The request contains no authentication, channel-enable, policy-selection, or
+free-form fact booleans. Core resolves the active principal/identity, selects
+its policy, canonicalizes channel/action/resource facts, and returns a typed
+`AuthorizationDecision` with `code`, `reason`, `audit_id`, and optional typed
+`confirmation_id`. A denied decision is audited and must stop the action.
+
+Telegram identities are untrusted and inactive until Core links them. AI also
+requires `assistant.use`; confirmation is a typed Core record, not a
+client-supplied flag. `PolicyPort` is read-only; Core management registers
+policy rules.
 
 ## Error hierarchy
 
@@ -189,4 +241,4 @@ marker base classes with a `result_type` and a `CommandHandler` /
 and greppable (`contract.md` §20); plugins are not required to wrap every call
 in one — the ports are the primary surface.
 
-Last updated: 2026-09-24
+Last updated: 2026-09-25

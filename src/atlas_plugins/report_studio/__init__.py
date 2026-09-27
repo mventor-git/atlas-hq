@@ -12,8 +12,9 @@ calls each bound handler, and the responses are rendered as-is.
 On top of that discovery sits a *declarative* reporting layer (contract section
 28): a :class:`ReportDefinition` names the logical dataset ids it consumes and a
 tabular shape — filter predicates, grouping columns, a per-group count, and the
-detail columns of each group. The shaping engine is column-generic: it resolves
-column positions by name from whatever a dataset happens to carry and never
+detail columns of each group. The shaping engine is column-generic and lives in
+the SDK (``shape_dataset``), so every report — including one rendered by a
+fixed reporting plugin — is shaped by the same deterministic code, which never
 interprets the business meaning of a value. A definition degrades gracefully
 when a declared dataset has no installed provider, because composability means
 a report still renders with whatever is present.
@@ -25,9 +26,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from atlas_sdk import (
+    AuthorizationError,
     CapabilityId,
     DomainEvent,
     EventId,
+    ExecutionHandle,
     ModuleDeclaration,
     NotFoundError,
     Plugin,
@@ -41,6 +44,9 @@ from atlas_sdk.reporting import (
     DatasetResponse,
     ReportDefinition,
     ReportDefinitionRequest,
+    ReportGroup,
+    ShapedDataset,
+    shape_dataset,
 )
 
 if TYPE_CHECKING:
@@ -58,32 +64,6 @@ class ReportRequest:
     """A request to render one report for one organization."""
 
     organization_id: str
-    actor_id: str
-
-
-@dataclass(frozen=True)
-class ReportGroup:
-    """One group of a shaped report: its key values, its size, and its details."""
-
-    key: tuple[str, ...]
-    count: int
-    rows: tuple[tuple[str, ...], ...]
-
-
-@dataclass(frozen=True)
-class ShapedDataset:
-    """The shaped view of one dataset a definition declared.
-
-    ``installed`` is false and ``note`` explains why when no enabled provider
-    supplies this dataset — the report degrades instead of crashing.
-    """
-
-    dataset_id: str
-    title: str
-    installed: bool = True
-    note: str | None = None
-    columns: tuple[str, ...] = ()
-    groups: tuple[ReportGroup, ...] = ()
 
 
 @dataclass
@@ -129,54 +109,6 @@ class RenderedReport:
         return "\n".join(lines)
 
 
-def _shape_dataset(dataset: DatasetResponse, definition: ReportDefinition) -> ShapedDataset:
-    """Apply a definition's shape to one dataset, by column name only.
-
-    This is the whole of the "smart composition": deterministic, and driven by
-    the dataset's own column metadata (contract section 14). No value is
-    interpreted beyond the declared column equality.
-    """
-    columns = dataset.columns
-    referenced = (
-        [f.column for f in definition.filters]
-        + list(definition.group_by)
-        + list(
-            definition.detail_columns,
-        )
-    )
-    if any(column not in columns for column in referenced):
-        return ShapedDataset(
-            dataset_id=dataset.dataset_id,
-            title=definition.title,
-            note=f"dataset {dataset.dataset_id} does not provide the columns this definition needs",
-        )
-
-    def positions(names: tuple[str, ...]) -> tuple[int, ...]:
-        return tuple(columns.index(name) for name in names)
-
-    filter_positions = [(columns.index(f.column), f.value) for f in definition.filters]
-    group_positions = positions(definition.group_by)
-    detail_positions = positions(definition.detail_columns)
-
-    groups: dict[tuple[str, ...], list[tuple[str, ...]]] = {}
-    for row in dataset.rows:
-        if any(row[position] != value for position, value in filter_positions):
-            continue
-        groups.setdefault(tuple(row[position] for position in group_positions), []).append(
-            tuple(row[position] for position in detail_positions),
-        )
-
-    return ShapedDataset(
-        dataset_id=dataset.dataset_id,
-        title=definition.title,
-        columns=definition.detail_columns,
-        groups=tuple(
-            ReportGroup(key=key, count=len(details), rows=tuple(details))
-            for key, details in groups.items()
-        ),
-    )
-
-
 class ReportStudioPlugin(Plugin):
     manifest = PluginManifest(
         plugin_id="report_studio",
@@ -212,22 +144,32 @@ class ReportStudioPlugin(Plugin):
         # Studio consumes definition and dataset contracts; it provides neither.
         pass
 
-    def _authorized(self, request: ReportRequest) -> Scope:
-        """Resolve the scope and enforce the render capability (Gates M, N)."""
-        scope = self.context.scope.resolve(request.organization_id)
-        if not self.context.authorization.check(REPORT_RENDER, scope, request.actor_id):
-            from atlas_sdk import AuthorizationError
+    def _authorized(
+        self,
+        request: ReportRequest,
+        execution_handle: ExecutionHandle,
+    ) -> Scope:
+        """Enforce the canonical handle; request organization data may only narrow it."""
+        requested_scope = self.context.scope.resolve(request.organization_id)
+        decision = self.context.authorization.authorize(
+            execution_handle,
+            REPORT_RENDER,
+            requested_scope,
+        )
+        if not decision.allowed:
+            raise AuthorizationError(f"report render denied: {decision.code}")
+        return decision.scope
 
-            raise AuthorizationError(
-                f"{request.actor_id!r} lacks capability {REPORT_RENDER} in scope {scope}",
-            )
-        return scope
-
-    def _definition(self, definition_id: str) -> ReportDefinition:
+    def _definition(
+        self,
+        definition_id: str,
+        execution_handle: ExecutionHandle,
+    ) -> ReportDefinition:
         """Find one SDK definition returned by any enabled fixed plugin."""
         responses = self.context.invoker.invoke_all(
             REPORT_DEFINITION_CONTRACT,
             ReportDefinitionRequest(definition_id=definition_id),
+            execution_handle=execution_handle,
         )
         definition = next(
             (
@@ -243,7 +185,11 @@ class ReportStudioPlugin(Plugin):
             raise NotFoundError(msg, kind="report_definition", key=definition_id)
         return definition
 
-    def _installed_datasets(self, organization_id: str) -> dict[str, DatasetResponse]:
+    def _installed_datasets(
+        self,
+        organization_id: str,
+        execution_handle: ExecutionHandle,
+    ) -> dict[str, DatasetResponse]:
         """Every dataset an enabled provider supplies, keyed by dataset id.
 
         Gate O lives in the single ``invoke_all`` call: the registry decides how
@@ -252,6 +198,7 @@ class ReportStudioPlugin(Plugin):
         responses = self.context.invoker.invoke_all(
             REPORT_DATASET_CONTRACT,
             DatasetRequest(organization_id=organization_id),
+            execution_handle=execution_handle,
         )
         return {
             dataset.dataset_id: dataset
@@ -259,23 +206,33 @@ class ReportStudioPlugin(Plugin):
             if isinstance(dataset, DatasetResponse)
         }
 
-    def render(self, request: ReportRequest) -> RenderedReport:
+    def render(
+        self,
+        request: ReportRequest,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> RenderedReport:
         """Compose every installed dataset into one flat report (Gate O)."""
-        return self.context.transactions.run(lambda: self._render(request))
+        return self.context.transactions.run(lambda: self._render(request, execution_handle))
 
-    def _render(self, request: ReportRequest) -> RenderedReport:
+    def _render(
+        self,
+        request: ReportRequest,
+        execution_handle: ExecutionHandle,
+    ) -> RenderedReport:
         """Uncommitted implementation used by the direct compatibility surface."""
-        scope = self._authorized(request)
-        datasets = list(self._installed_datasets(request.organization_id).values())
+        self._authorized(request, execution_handle)
+        datasets = list(
+            self._installed_datasets(request.organization_id, execution_handle).values(),
+        )
 
         audit_id = self.context.audit.record(
             action="report.rendered",
-            actor=request.actor_id,
-            scope=scope,
             details={
                 "organization_id": request.organization_id,
                 "datasets": [d.dataset_id for d in datasets],
             },
+            execution_handle=execution_handle,
         )
 
         self.context.events.publish(
@@ -283,11 +240,11 @@ class ReportStudioPlugin(Plugin):
                 event_id=REPORT_GENERATED,
                 payload={
                     "organization_id": request.organization_id,
-                    "actor_id": request.actor_id,
                     "datasets": [d.dataset_id for d in datasets],
                     "audit_id": audit_id,
                 },
             ),
+            execution_handle=execution_handle,
         )
 
         return RenderedReport(
@@ -296,7 +253,13 @@ class ReportStudioPlugin(Plugin):
             audit_id=audit_id,
         )
 
-    def render_definition(self, request: ReportRequest, definition_id: str) -> RenderedReport:
+    def render_definition(
+        self,
+        request: ReportRequest,
+        definition_id: str,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> RenderedReport:
         """Render one named report definition (contract section 28).
 
         The requested SDK definition is discovered through ``report.definition``;
@@ -307,14 +270,19 @@ class ReportStudioPlugin(Plugin):
         a plugin is absent.
         """
         return self.context.transactions.run(
-            lambda: self._render_definition(request, definition_id)
+            lambda: self._render_definition(request, definition_id, execution_handle)
         )
 
-    def _render_definition(self, request: ReportRequest, definition_id: str) -> RenderedReport:
+    def _render_definition(
+        self,
+        request: ReportRequest,
+        definition_id: str,
+        execution_handle: ExecutionHandle,
+    ) -> RenderedReport:
         """Uncommitted implementation used by the direct compatibility surface."""
-        scope = self._authorized(request)
-        definition = self._definition(definition_id)
-        installed = self._installed_datasets(request.organization_id)
+        self._authorized(request, execution_handle)
+        definition = self._definition(definition_id, execution_handle)
+        installed = self._installed_datasets(request.organization_id, execution_handle)
 
         sections: list[ShapedDataset] = []
         contributing: list[str] = []
@@ -331,17 +299,16 @@ class ReportStudioPlugin(Plugin):
                 )
                 continue
             contributing.append(dataset_id)
-            sections.append(_shape_dataset(dataset, definition))
+            sections.append(shape_dataset(dataset, definition))
 
         audit_id = self.context.audit.record(
             action="report.rendered",
-            actor=request.actor_id,
-            scope=scope,
             details={
                 "organization_id": request.organization_id,
                 "definition_id": definition.definition_id,
                 "datasets": contributing,
             },
+            execution_handle=execution_handle,
         )
 
         self.context.events.publish(
@@ -349,12 +316,12 @@ class ReportStudioPlugin(Plugin):
                 event_id=REPORT_GENERATED,
                 payload={
                     "organization_id": request.organization_id,
-                    "actor_id": request.actor_id,
                     "definition_id": definition.definition_id,
                     "datasets": contributing,
                     "audit_id": audit_id,
                 },
             ),
+            execution_handle=execution_handle,
         )
 
         return RenderedReport(

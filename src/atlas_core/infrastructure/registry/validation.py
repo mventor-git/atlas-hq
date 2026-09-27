@@ -48,6 +48,38 @@ def validate_manifest(manifest: PluginManifest) -> list[str]:
             f"a capability cannot be both provided and consumed: {', '.join(sorted(conflicting))}",
         )
 
+    undeclared_kinds = set(manifest.capability_kinds) - provided
+    if undeclared_kinds:
+        errors.append(
+            "capability kinds are declared for unprovided capabilities: "
+            f"{', '.join(sorted(str(capability) for capability in undeclared_kinds))}",
+        )
+
+    if len(set(manifest.owned_tables)) != len(manifest.owned_tables):
+        errors.append("owned_tables must not contain duplicates")
+    core_tables = {
+        "employee",
+        "organization",
+        "workplace",
+        "job",
+        "assignment",
+        "audit",
+        "principal",
+        "identity",
+        "capability",
+        "policy",
+        "role",
+        "role_capability",
+        "role_assignment",
+        "capability_grant",
+        "confirmation",
+        "execution_handle",
+        "outbox",
+    }
+    for table in manifest.owned_tables:
+        if table in core_tables:
+            errors.append(f"a plugin cannot own Core table {table!r}")
+
     for declaration in manifest.provides_contracts:
         if not declaration.contract_id or not declaration.contract_id.strip():
             errors.append("a provided contract must declare a contract_id")

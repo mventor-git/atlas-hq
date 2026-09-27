@@ -11,6 +11,22 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
+from typing import NewType
+
+from .capability import CapabilityId
+
+
+class Channel(StrEnum):
+    """A channel-neutral transport name used by Core authorization."""
+
+    WEB = "web"
+    CORE = "core"
+    TELEGRAM = "telegram"
+    AI = "ai"
+
+
+AuthorizationChannel = Channel
+WorkplaceId = NewType("WorkplaceId", str)
 
 
 class WorkplaceType(StrEnum):
@@ -52,16 +68,41 @@ class AttendanceStatus(StrEnum):
 class Scope:
     """The context in which an operation or record lives (contract section 35).
 
-    ``organization_id`` ``None`` means "no access" — a query narrowed to a
-    disjoint scope yields a global-less scope rather than raising.
+    ``organization_id`` and ``principal_id`` are independent dimensions. A
+    principal-only scope is the safe ``self`` boundary used by report use cases;
+    an entirely empty scope still means "no access".
     """
 
     organization_id: str | None = None
     workplace_id: str | None = None
+    principal_id: str | None = None
 
     @property
     def is_empty(self) -> bool:
-        return self.organization_id is None
+        return self.organization_id is None and self.principal_id is None
+
+    @property
+    def subject_id(self) -> str | None:
+        """Compatibility alias for the pre-principal scope vocabulary."""
+        return self.principal_id
+
+
+@dataclass(frozen=True)
+class AuthorizationDecision:
+    """Typed Core result; callers must inspect ``allowed`` and ``code``."""
+
+    allowed: bool
+    principal_id: str | None
+    capability: CapabilityId
+    scope: Scope
+    channel: Channel
+    reason: str = ""
+    code: str = "denied"
+    audit_id: str | None = None
+    confirmation_id: str | None = None
+
+    def __bool__(self) -> bool:
+        return self.allowed
 
 
 @dataclass(frozen=True)
@@ -151,6 +192,9 @@ class ScheduledJob:
 __all__ = [
     "Assignment",
     "AuditEntry",
+    "AuthorizationChannel",
+    "AuthorizationDecision",
+    "Channel",
     "Employee",
     "Job",
     "Notification",
@@ -158,6 +202,7 @@ __all__ = [
     "ScheduledJob",
     "Scope",
     "Workplace",
+    "WorkplaceId",
     "WorkplaceType",
     "WorkflowCase",
 ]

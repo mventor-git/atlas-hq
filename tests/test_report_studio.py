@@ -14,16 +14,28 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from tests.conftest import (
+    assign_role_for_test,
+    issue_handle_for_test,
+    issue_uow_handle_for_test,
+)
 from tests.synthetic import refresh_metadata_cache
 
 from atlas_core.application.organization import OrganizationService
 from atlas_core.application.people import PeopleService
 from atlas_core.application.unit_of_work import UnitOfWorkPort
+from atlas_core.domain.role import (
+    AUDIT_READ,
+    ORGANIZATION_MANAGE,
+    PEOPLE_EMPLOYEE_CREATE,
+    PEOPLE_EMPLOYEE_READ,
+)
 from atlas_core.infrastructure.events import OutboxEventPublisher
 from atlas_core.kernel import Kernel
 from atlas_plugins.construction_reporting import CONSTRUCTION_DAILY_WORKFORCE
 from atlas_plugins.report_studio import (
     REPORT_GENERATED,
+    REPORT_RENDER,
     RenderedReport,
     ReportRequest,
     ReportStudioPlugin,
@@ -35,6 +47,7 @@ from atlas_sdk import (
     ContractId,
     DomainEvent,
     NotFoundError,
+    Scope,
     WorkplaceType,
 )
 
@@ -55,13 +68,53 @@ def report_kernel(real_kernel: Kernel) -> Kernel:
 def org(uow_factory: Callable[[], UnitOfWorkPort]) -> str:
     with uow_factory() as uow:
         return (
-            OrganizationService(uow).create_organization(name="Acme", code="ACME").organization_id
+            OrganizationService(uow)
+            .create_organization(
+                name="Acme",
+                code="ACME",
+                execution_handle=issue_uow_handle_for_test(
+                    uow_factory,
+                    ORGANIZATION_MANAGE,
+                    "organization.create",
+                    Scope(principal_id="seed.report"),
+                    principal_id="seed.report",
+                ),
+            )
+            .organization_id
         )
 
 
 def _grant(kernel: Kernel, org_id: str) -> None:
-    context = kernel.context_for("report_studio")
-    context.authorization.grant(ACTOR, "role.report_renderer", context.scope.resolve(org_id))
+    scope = kernel.context_for("report_studio").scope.resolve(org_id)
+    assign_role_for_test(kernel, ACTOR, "role.report_renderer", scope)
+    kernel.authorization_management.grant_capability(
+        ACTOR, PEOPLE_EMPLOYEE_READ, scope, actor="tests"
+    )
+    kernel.authorization_management.grant_capability(ACTOR, AUDIT_READ, scope, actor="tests")
+
+
+def _context(
+    kernel: Kernel,
+    org_id: str,
+    *,
+    actor: str = ACTOR,
+    capability=REPORT_RENDER,
+    action: str = "report.render",
+):
+    return issue_handle_for_test(
+        kernel,
+        actor,
+        capability,
+        action,
+        kernel.context_for("report_studio").scope.resolve(org_id),
+        resource_id=org_id,
+        additional_capabilities=(
+            PEOPLE_EMPLOYEE_READ,
+            CapabilityId("workplace.view"),
+            CapabilityId("attendance.view"),
+            AUDIT_READ,
+        ),
+    )
 
 
 def test_report_studio_consumes_two_providers_without_knowing_them(
@@ -111,9 +164,12 @@ def test_rendering_requires_the_capability(report_kernel: Kernel, org: str) -> N
 
 def test_render_is_scope_limited(report_kernel: Kernel, org: str) -> None:
     """Gate N: an actor granted in a different scope cannot render this org."""
-    context = report_kernel.context_for("report_studio")
-    foreign = context.scope.resolve("org_foreign_scope")
-    context.authorization.grant(ACTOR, "role.report_renderer", foreign)
+    assign_role_for_test(
+        report_kernel,
+        ACTOR,
+        "role.report_renderer",
+        report_kernel.context_for("report_studio").scope.resolve("org_foreign_scope"),
+    )
 
     with pytest.raises(AuthorizationError):
         _render(report_kernel, org)
@@ -132,7 +188,10 @@ def _render(kernel: Kernel, org_id: str) -> RenderedReport:
     direct import of any dataset provider."""
     instance = kernel._instances["report_studio"]
     assert isinstance(instance, ReportStudioPlugin)
-    return instance.render(ReportRequest(organization_id=org_id, actor_id=ACTOR))
+    return instance.render(
+        ReportRequest(organization_id=org_id),
+        execution_handle=_context(kernel, org_id),
+    )
 
 
 def test_fixed_construction_reporting_entry_point_is_discovered_and_registered(
@@ -238,24 +297,63 @@ def construction_org(
 ) -> tuple[str, tuple[str, str]]:
     """One org, two employees, two workplaces: one site, one office."""
     with uow_factory() as uow:
-        org = OrganizationService(uow).create_organization(name="Build", code="BUILD")
+        org = OrganizationService(uow).create_organization(
+            name="Build",
+            code="BUILD",
+            execution_handle=issue_uow_handle_for_test(
+                uow_factory,
+                ORGANIZATION_MANAGE,
+                "organization.create",
+                Scope(principal_id="seed.construction"),
+                principal_id="seed.construction",
+            ),
+        )
         people = PeopleService(uow, OutboxEventPublisher(uow, publisher="seed"))
         ada = people.create_employee(
             full_name="Ada Lovelace",
             employee_number="EMP-1",
             organization_id=org.organization_id,
+            execution_handle=issue_uow_handle_for_test(
+                uow_factory,
+                PEOPLE_EMPLOYEE_CREATE,
+                "people.employee.create",
+                Scope(organization_id=org.organization_id),
+            ),
         )
         grace = people.create_employee(
             full_name="Grace Hopper",
             employee_number="EMP-2",
             organization_id=org.organization_id,
+            execution_handle=issue_uow_handle_for_test(
+                uow_factory,
+                PEOPLE_EMPLOYEE_CREATE,
+                "people.employee.create",
+                Scope(organization_id=org.organization_id),
+            ),
         )
     # The actor must be able to both build the workforce and read the report.
-    workplace_context = construction_kernel.context_for("workplace_operations")
     report_context = construction_kernel.context_for("report_studio")
     scope = report_context.scope.resolve(org.organization_id)
-    workplace_context.authorization.grant("user.workplace_admin", "role.workplace_manager", scope)
-    report_context.authorization.grant(ACTOR, "role.report_renderer", scope)
+    assign_role_for_test(
+        construction_kernel,
+        "user.workplace_admin",
+        "role.workplace_manager",
+        scope,
+    )
+    assign_role_for_test(construction_kernel, ACTOR, "role.report_renderer", scope)
+    assign_role_for_test(construction_kernel, ACTOR, "role.workplace_viewer", scope)
+    construction_kernel.authorization_management.grant_capability(
+        ACTOR, PEOPLE_EMPLOYEE_READ, scope, actor="tests"
+    )
+    construction_kernel.authorization_management.grant_capability(
+        "user.workplace_admin", PEOPLE_EMPLOYEE_READ, scope, actor="tests"
+    )
+    construction_kernel.authorization_management.grant_capability(
+        ACTOR, AUDIT_READ, scope, actor="tests"
+    )
+    construction_kernel.authorization_management.grant_capability(
+        "user.workplace_admin", AUDIT_READ, scope, actor="tests"
+    )
 
     from atlas_plugins.workplace_operations import (
         WorkforceMembershipRequest,
@@ -266,6 +364,13 @@ def construction_org(
     workplace_admin = "user.workplace_admin"
     workplace = construction_kernel._instances["workplace_operations"]
     assert isinstance(workplace, WorkplaceOperationsPlugin)
+    workplace_admin_context = _context(
+        construction_kernel,
+        org.organization_id,
+        actor=workplace_admin,
+        capability=CapabilityId("workplace.manage"),
+        action="workplace.create",
+    )
     # A real construction site with two members.
     site = workplace.create_workplace(
         WorkplaceRequest(
@@ -273,14 +378,13 @@ def construction_org(
             name="Riverside Tower",
             code="RT-01",
             kind=WorkplaceType.SITE,
-            actor_id=workplace_admin,
         ),
+        execution_handle=workplace_admin_context,
     )
     for employee_id in (ada.employee_id, grace.employee_id):
         workplace.add_workforce_member(
-            WorkforceMembershipRequest(
-                workplace_id=site.workplace_id, employee_id=employee_id, actor_id=workplace_admin
-            ),
+            WorkforceMembershipRequest(workplace_id=site.workplace_id, employee_id=employee_id),
+            execution_handle=workplace_admin_context,
         )
     # A non-site workplace with one member — must NOT appear in the site report.
     office = workplace.create_workplace(
@@ -289,13 +393,12 @@ def construction_org(
             name="Headquarters",
             code="HQ-01",
             kind=WorkplaceType.OFFICE,
-            actor_id=workplace_admin,
         ),
+        execution_handle=workplace_admin_context,
     )
     workplace.add_workforce_member(
-        WorkforceMembershipRequest(
-            workplace_id=office.workplace_id, employee_id=ada.employee_id, actor_id=workplace_admin
-        ),
+        WorkforceMembershipRequest(workplace_id=office.workplace_id, employee_id=ada.employee_id),
+        execution_handle=workplace_admin_context,
     )
     return org.organization_id, (ada.employee_id, grace.employee_id)
 
@@ -304,8 +407,9 @@ def _render_definition(kernel: Kernel, org_id: str) -> RenderedReport:
     instance = kernel._instances["report_studio"]
     assert isinstance(instance, ReportStudioPlugin)
     return instance.render_definition(
-        ReportRequest(organization_id=org_id, actor_id=ACTOR),
+        ReportRequest(organization_id=org_id),
         CONSTRUCTION_DAILY_WORKFORCE.definition_id,
+        execution_handle=_context(kernel, org_id),
     )
 
 
@@ -362,8 +466,9 @@ def test_unknown_definition_has_a_clear_not_found_error(
 
     with pytest.raises(NotFoundError, match="missing.definition") as caught:
         instance.render_definition(
-            ReportRequest(organization_id=org_id, actor_id=ACTOR),
+            ReportRequest(organization_id=org_id),
             "missing.definition",
+            execution_handle=_context(construction_kernel, org_id),
         )
 
     assert caught.value.kind == "report_definition"
@@ -423,7 +528,11 @@ def test_the_daily_workforce_report_records_audit(
 
     assert report.audit_id is not None
     context = construction_kernel.context_for("report_studio")
-    records = context.audit.list_records(organization_id=org_id, limit=20)
+    records = context.audit.list_records(
+        organization_id=org_id,
+        limit=20,
+        execution_handle=_context(construction_kernel, org_id),
+    )
     assert any(
         r.action == "report.rendered"
         and r.details.get("definition_id") == CONSTRUCTION_DAILY_WORKFORCE.definition_id
@@ -484,8 +593,13 @@ def test_rendering_a_definition_requires_the_capability(
         instance = construction_kernel._instances["report_studio"]
         assert isinstance(instance, ReportStudioPlugin)
         instance.render_definition(
-            ReportRequest(organization_id=org_id, actor_id="user.unauthorized"),
+            ReportRequest(organization_id=org_id),
             CONSTRUCTION_DAILY_WORKFORCE.definition_id,
+            execution_handle=_context(
+                construction_kernel,
+                org_id,
+                actor="user.unauthorized",
+            ),
         )
 
 
@@ -496,7 +610,8 @@ def test_definition_rendering_is_scope_limited(
     org_id, _employees = construction_org
     context = construction_kernel.context_for("report_studio")
     foreign_actor = "user.foreign_scope"
-    context.authorization.grant(
+    assign_role_for_test(
+        construction_kernel,
         foreign_actor,
         "role.report_renderer",
         context.scope.resolve("org_foreign_scope"),
@@ -506,8 +621,13 @@ def test_definition_rendering_is_scope_limited(
 
     with pytest.raises(AuthorizationError):
         instance.render_definition(
-            ReportRequest(organization_id=org_id, actor_id=foreign_actor),
+            ReportRequest(organization_id=org_id),
             CONSTRUCTION_DAILY_WORKFORCE.definition_id,
+            execution_handle=_context(
+                construction_kernel,
+                "org_foreign_scope",
+                actor=foreign_actor,
+            ),
         )
 
 
@@ -521,8 +641,8 @@ def test_definition_render_failure_rolls_back_audit_and_outbox(
     context = construction_kernel.context_for("report_studio")
     original_publish = context.events.publish
 
-    def publish_then_fail(event: DomainEvent) -> None:
-        original_publish(event)
+    def publish_then_fail(event: DomainEvent, *, execution_handle) -> None:
+        original_publish(event, execution_handle=execution_handle)
         raise RuntimeError("report publication failed")
 
     monkeypatch.setattr(context.events, "publish", publish_then_fail)

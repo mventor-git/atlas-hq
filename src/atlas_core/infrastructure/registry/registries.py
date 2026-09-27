@@ -12,23 +12,27 @@ silently overwriting another plugin's entry.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
 from atlas_sdk import (
     AlreadyRegisteredError,
+    AuthorizationError,
     CapabilityId,
     ContractDeclaration,
     ContractId,
     ContractImplementation,
     EventId,
+    ExecutionHandle,
     NotFoundError,
     PluginLifecycle,
     PluginManifest,
 )
 from atlas_sdk.manifest import ClusterManifest
 
+from ...application.execution import _core_handle_token
 from ...domain.clusters import INITIAL_CLUSTERS
 
 
@@ -204,9 +208,31 @@ class InMemoryContractRegistry:
     def __init__(self) -> None:
         self._declarations: list[ContractImplementation] = []
         self._bindings: dict[tuple[str, str], Any] = {}
+        # A registry cannot turn this boundary off.
+        self._require_execution_handle = True
         #: plugin_id -> explicit transaction owner. The kernel supplies one per
         #: context and re-registers it when a disabled plugin is re-enabled.
         self._transaction_owners: dict[str, TransactionOwner] = {}
+        self._handle_validator: Callable[[ExecutionHandle], object] | None = None
+
+    def require_execution_handle(self) -> None:
+        """Keep the contract boundary mandatory; this method cannot disable it."""
+        self._require_execution_handle = True
+
+    def _set_handle_validator(
+        self,
+        validator: Callable[[ExecutionHandle], object] | None,
+    ) -> None:
+        self._handle_validator = validator
+
+    def _validate_handle(self, execution_handle: ExecutionHandle) -> None:
+        _core_handle_token(execution_handle)
+        if self._handle_validator is None:
+            raise AuthorizationError("a Core ExecutionHandle validator is required")
+        try:
+            self._handle_validator(execution_handle)
+        except (AuthorizationError, TypeError, ValueError) as exc:
+            raise AuthorizationError("ExecutionHandle could not be resolved") from exc
 
     def register(self, declaration: ContractDeclaration, plugin_id: str) -> None:
         self._declarations.append(
@@ -278,7 +304,15 @@ class InMemoryContractRegistry:
             (pid, value) for (cid, pid), value in self._bindings.items() if cid == str(contract_id)
         ]
 
-    def invoke(self, contract_id: ContractId, request: object) -> object:
+    def invoke(
+        self,
+        contract_id: ContractId,
+        request: object,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> object:
+        if not isinstance(execution_handle, ExecutionHandle):
+            raise AuthorizationError("a server-issued ExecutionHandle is required")
         bound = self._bound(contract_id)
         if not bound:
             raise NotFoundError(
@@ -287,11 +321,31 @@ class InMemoryContractRegistry:
                 key=contract_id,
             )
         plugin_id, instance = bound[0]
-        return self._invoke_one(contract_id, plugin_id, instance, request)
+        return self._invoke_one(
+            contract_id,
+            plugin_id,
+            instance,
+            request,
+            execution_handle=execution_handle,
+        )
 
-    def invoke_all(self, contract_id: ContractId, request: object) -> list[object]:
+    def invoke_all(
+        self,
+        contract_id: ContractId,
+        request: object,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> list[object]:
+        if not isinstance(execution_handle, ExecutionHandle):
+            raise AuthorizationError("a server-issued ExecutionHandle is required")
         return [
-            self._invoke_one(contract_id, plugin_id, instance, request)
+            self._invoke_one(
+                contract_id,
+                plugin_id,
+                instance,
+                request,
+                execution_handle=execution_handle,
+            )
             for plugin_id, instance in self._bound(contract_id)
         ]
 
@@ -301,20 +355,19 @@ class InMemoryContractRegistry:
         plugin_id: str,
         instance: Any,
         request: object,
+        *,
+        execution_handle: ExecutionHandle,
     ) -> object:
-        """Run one handler inside its provider's transaction.
-
-        Committing here — not inside the plugin — is deliberate. A plugin never
-        manages the transaction itself; the platform guarantees that a state
-        change and the event it published commit together or not at all
-        (contract section 21).
-        """
+        """Run one handler inside its provider's transaction."""
         owner = self._transaction_owners.get(plugin_id)
         if owner is None:
             msg = f"plugin {plugin_id!r} has no transaction owner for its contract"
             raise RuntimeError(msg)
+        self._validate_handle(execution_handle)
+        if not isinstance(execution_handle, ExecutionHandle):
+            raise AuthorizationError("a server-issued ExecutionHandle is required")
         try:
-            result = instance.handle(request)
+            result = self._handle_with_handle(instance, request, execution_handle)
         except BaseException as error:
             _rollback_preserving(owner, error)
             raise
@@ -324,6 +377,19 @@ class InMemoryContractRegistry:
             _rollback_preserving(owner, error)
             raise
         return result
+
+    @staticmethod
+    def _handle_with_handle(
+        instance: Any,
+        request: object,
+        execution_handle: ExecutionHandle,
+    ) -> object:
+        """Call only handlers that explicitly accept the required handle."""
+        handler = instance.handle
+        parameters = inspect.signature(handler).parameters
+        if "execution_handle" in parameters:
+            return handler(request, execution_handle=execution_handle)
+        raise AuthorizationError("contract handler does not accept ExecutionHandle")
 
 
 class InMemoryEventRegistry:

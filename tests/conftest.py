@@ -11,6 +11,8 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -19,6 +21,10 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from tests.synthetic import TEST_ENTRY_POINT_GROUP
 
+from atlas_core.application.execution import ExecutionHandleIssuer, ExecutionHandleStore
+from atlas_core.application.policy import PolicyService
+from atlas_core.application.unit_of_work import UnitOfWorkPort
+from atlas_core.domain.role import Capability, CapabilityGrant, Principal
 from atlas_core.infrastructure.persistence.session import (
     SessionFactory,
     create_schema,
@@ -28,6 +34,108 @@ from atlas_core.infrastructure.persistence.session import (
 )
 from atlas_core.infrastructure.persistence.unit_of_work import SqlUnitOfWork
 from atlas_core.kernel import Kernel
+from atlas_sdk import CapabilityId, Channel, ExecutionHandle, Scope
+
+
+@dataclass(frozen=True)
+class AuthorizationIntent:
+    """Test fixture intent; never a Core/SDK authority object."""
+
+    capability: CapabilityId
+    scope: Scope
+    channel: Channel
+    action: str
+    principal_id: str | None = None
+    identity_id: str | None = None
+    resource_id: str | None = None
+    confirmation_id: str | None = None
+
+
+def assign_role_for_test(
+    kernel: Kernel,
+    principal_id: str,
+    role_id: str,
+    scope: Scope,
+) -> None:
+    """Seed a legacy fixture role through the Core-only management boundary."""
+    management = kernel.authorization_management
+    management.create_principal(principal_id, actor="tests")
+    management.assign_role(principal_id, role_id, scope, actor="tests")
+
+
+def issue_handle_for_test(
+    kernel: Kernel,
+    principal_id: str,
+    capability: CapabilityId,
+    action: str,
+    scope: Scope,
+    *,
+    resource_id: str | None = None,
+    channel: Channel = Channel.WEB,
+    additional_capabilities: tuple[CapabilityId, ...] = (),
+) -> ExecutionHandle:
+    """Issue an opaque handle through the same trusted Core seam used by production."""
+    kernel.authorization_management.create_principal(principal_id, actor="tests")
+    return kernel.issue_execution_handle(
+        principal_id=principal_id,
+        capability=capability,
+        action=action,
+        scope=scope,
+        channel=channel,
+        resource_id=resource_id,
+        additional_capabilities=additional_capabilities,
+    )
+
+
+def opaque_handle_for_test() -> ExecutionHandle:
+    """Create a Core-issued shape for low-level registry tests with explicit validators."""
+    from atlas_core.application.execution import _new_core_handle
+
+    return _new_core_handle(f"test-handle-{uuid.uuid4().hex}")
+
+
+def issue_uow_handle_for_test(
+    uow_factory: Callable[[], UnitOfWorkPort],
+    capability: CapabilityId,
+    action: str,
+    scope: Scope,
+    *,
+    principal_id: str = "test.service",
+    resource_id: str | None = None,
+    channel: Channel = Channel.WEB,
+    additional_capabilities: tuple[CapabilityId, ...] = (),
+) -> ExecutionHandle:
+    """Seed one explicit Core grant and issue its opaque handle for direct services."""
+    with uow_factory() as uow:
+        repository = uow.authorization
+        if repository.get_principal(principal_id) is None:
+            repository.add_principal(Principal(principal_id=principal_id))
+        if repository.get_capability(capability) is None:
+            repository.upsert_capability(Capability(capability_id=capability))
+        if not any(
+            grant.capability_id == capability and grant.scope == scope
+            for grant in repository.grants_for(principal_id)
+        ):
+            repository.add_grant(
+                CapabilityGrant(
+                    principal_id=principal_id,
+                    capability_id=capability,
+                    scope=scope,
+                )
+            )
+        policy = PolicyService(uow)
+        policy.register("test.allow-all", date.min)
+        policy.register_default(str(capability))
+        return ExecutionHandleIssuer(uow, ExecutionHandleStore(uow)).issue(
+            principal_id=principal_id,
+            capability=capability,
+            action=action,
+            scope=scope,
+            channel=channel,
+            resource_id=resource_id,
+            additional_capabilities=additional_capabilities,
+        )
+
 
 TEST_DATABASE_ENV = "ATLAS_TEST_DATABASE_URL"
 
@@ -96,14 +204,14 @@ def uow_factory(
 
     yield factory
     for unit in reversed(units):
-        unit.session.close()
+        unit.close()
 
 
 @pytest.fixture
 def kernel(uow_factory: Callable[[], SqlUnitOfWork]) -> Kernel:
     """A kernel wired to the isolated PostgreSQL database.
 
-    It boots against the test-only entry-point group so the eight plugins shipped
+    It boots against the test-only entry-point group so the nine plugins shipped
     in this distribution never appear in a unit test's registry. Tests that
     specifically exercise the real plugins opt into the real group.
     """

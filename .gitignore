@@ -21,10 +21,28 @@ htmlcov/
 coverage.xml
 .tox/
 
+# start-demo.ps1's captured child output (contract.md 40.3). `-LogRoot <path>`
+# can put it elsewhere, but the default is here and the default is what lands in
+# a checkout. The launcher's own PowerShell scripts are not logs and stay
+# tracked: *.ps1 and the tests that check them are release surface.
+logs/
+
 # Type checkers / linters
 .pyright/
 .ruff_cache/
 .mypy_cache/
+
+# Node / web console (web/).
+# `dist/` and `build/` above are unanchored, so web/dist is already covered.
+node_modules/
+coverage/
+*.tsbuildinfo
+.vite/
+npm-debug.log*
+# Local env files. `.env.example` is committed; a real one is not, and neither is
+# a machine-local override.
+.env.local
+.env.*.local
 
 # IDE / editors
 .idea/

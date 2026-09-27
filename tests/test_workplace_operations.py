@@ -12,10 +12,21 @@ from collections.abc import Callable
 from typing import cast
 
 import pytest
+from tests.conftest import (
+    assign_role_for_test,
+    issue_handle_for_test,
+    issue_uow_handle_for_test,
+)
 
 from atlas_core.application.organization import OrganizationService
 from atlas_core.application.people import PeopleService
 from atlas_core.application.unit_of_work import UnitOfWorkPort
+from atlas_core.domain.role import (
+    AUDIT_READ,
+    ORGANIZATION_MANAGE,
+    PEOPLE_EMPLOYEE_CREATE,
+    PEOPLE_EMPLOYEE_READ,
+)
 from atlas_core.infrastructure.events import OutboxEventPublisher
 from atlas_core.kernel import Kernel
 from atlas_plugins.workplace_operations import (
@@ -33,7 +44,7 @@ from atlas_plugins.workplace_operations import (
     WorkplaceOperationsPlugin,
     WorkplaceRequest,
 )
-from atlas_sdk import AuthorizationError, WorkplaceType
+from atlas_sdk import AuthorizationError, Scope, WorkplaceType
 
 ACTOR = "user.workplace_admin"
 MANAGER_ROLE = "role.workplace_manager"
@@ -50,11 +61,27 @@ def workplace_kernel(real_kernel: Kernel) -> Kernel:
 @pytest.fixture
 def org_with_employee(uow_factory: Callable[[], UnitOfWorkPort]) -> tuple[str, str]:
     with uow_factory() as uow:
-        org = OrganizationService(uow).create_organization(name="Acme", code="ACME")
+        org = OrganizationService(uow).create_organization(
+            name="Acme",
+            code="ACME",
+            execution_handle=issue_uow_handle_for_test(
+                uow_factory,
+                ORGANIZATION_MANAGE,
+                "organization.create",
+                Scope(principal_id="seed.workplace"),
+                principal_id="seed.workplace",
+            ),
+        )
         employee = PeopleService(uow, OutboxEventPublisher(uow, publisher="seed")).create_employee(
             full_name="Ada Lovelace",
             employee_number="EMP-1",
             organization_id=org.organization_id,
+            execution_handle=issue_uow_handle_for_test(
+                uow_factory,
+                PEOPLE_EMPLOYEE_CREATE,
+                "people.employee.create",
+                Scope(organization_id=org.organization_id),
+            ),
         )
     return org.organization_id, employee.employee_id
 
@@ -66,26 +93,59 @@ def _plugin(kernel: Kernel) -> WorkplaceOperationsPlugin:
 
 
 def _grant(kernel: Kernel, role: str, org_id: str) -> None:
-    context = kernel.context_for("workplace_operations")
-    context.authorization.grant(ACTOR, role, context.scope.resolve(org_id))
+    scope = kernel.context_for("workplace_operations").scope.resolve(org_id)
+    assign_role_for_test(kernel, ACTOR, role, scope)
+    kernel.authorization_management.grant_capability(
+        ACTOR, PEOPLE_EMPLOYEE_READ, scope, actor="tests"
+    )
+    kernel.authorization_management.grant_capability(ACTOR, AUDIT_READ, scope, actor="tests")
+
+
+def _context(
+    kernel: Kernel,
+    org_id: str,
+    *,
+    capability=WORKPLACE_VIEW,
+    action: str = "workplace.view",
+    actor: str = ACTOR,
+    resource_id: str | None = None,
+):
+    return issue_handle_for_test(
+        kernel,
+        actor,
+        capability,
+        action,
+        kernel.context_for("workplace_operations").scope.resolve(org_id),
+        resource_id=resource_id,
+        additional_capabilities=(PEOPLE_EMPLOYEE_READ, AUDIT_READ),
+    )
 
 
 def _make_workplace(
-    kernel: Kernel, org_id: str, code: str = "HQ", kind: WorkplaceType = WorkplaceType.OFFICE
+    kernel: Kernel,
+    org_id: str,
+    code: str = "HQ",
+    kind: WorkplaceType = WorkplaceType.OFFICE,
+    *,
+    execution_handle,
 ) -> str:
+    context = execution_handle
     workplace = _plugin(kernel).create_workplace(
         WorkplaceRequest(
-            organization_id=org_id, name=f"Workplace {code}", code=code, kind=kind, actor_id=ACTOR
+            organization_id=org_id,
+            name=f"Workplace {code}",
+            code=code,
+            kind=kind,
         ),
+        execution_handle=context,
     )
     return workplace.workplace_id
 
 
-def _add_member(kernel: Kernel, workplace_id: str, employee_id: str) -> None:
+def _add_member(kernel: Kernel, workplace_id: str, employee_id: str, *, execution_handle) -> None:
     _plugin(kernel).add_workforce_member(
-        WorkforceMembershipRequest(
-            workplace_id=workplace_id, employee_id=employee_id, actor_id=ACTOR
-        ),
+        WorkforceMembershipRequest(workplace_id=workplace_id, employee_id=employee_id),
+        execution_handle=execution_handle,
     )
 
 
@@ -135,7 +195,12 @@ def test_creates_a_typed_workplace_and_persists_it(
             name="Riverside Construction Site",
             code="RCS-1",
             kind=WorkplaceType.SITE,
-            actor_id=ACTOR,
+        ),
+        execution_handle=_context(
+            workplace_kernel,
+            org_id,
+            capability=WORKPLACE_MANAGE,
+            action="workplace.create",
         ),
     )
 
@@ -144,7 +209,13 @@ def test_creates_a_typed_workplace_and_persists_it(
     assert workplace.organization_id == org_id
 
     # Persistence is real: a fresh lookup through the plugin finds it.
-    found = [w for w in _plugin(workplace_kernel).list_workplaces(organization_id=org_id)]
+    found = [
+        w
+        for w in _plugin(workplace_kernel).list_workplaces(
+            organization_id=org_id,
+            execution_handle=_context(workplace_kernel, org_id),
+        )
+    ]
     assert any(w.workplace_id == workplace.workplace_id for w in found)
 
 
@@ -162,10 +233,30 @@ def test_adds_workforce_and_lists_the_member(
 ) -> None:
     org_id, employee_id = org_with_employee
     _grant(workplace_kernel, MANAGER_ROLE, org_id)
-    workplace_id = _make_workplace(workplace_kernel, org_id)
-    _add_member(workplace_kernel, workplace_id, employee_id)
+    workplace_id = _make_workplace(
+        workplace_kernel,
+        org_id,
+        execution_handle=_context(
+            workplace_kernel, org_id, capability=WORKPLACE_MANAGE, action="workplace.create"
+        ),
+    )
+    _add_member(
+        workplace_kernel,
+        workplace_id,
+        employee_id,
+        execution_handle=_context(
+            workplace_kernel,
+            org_id,
+            capability=WORKPLACE_MANAGE,
+            action="workplace.workforce.add",
+            resource_id=workplace_id,
+        ),
+    )
 
-    members = _plugin(workplace_kernel).list_workforce(workplace_id)
+    members = _plugin(workplace_kernel).list_workforce(
+        workplace_id,
+        execution_handle=_context(workplace_kernel, org_id, resource_id=workplace_id),
+    )
     assert len(members) == 1
     assert members[0].employee_id == employee_id
     assert members[0].full_name == "Ada Lovelace"
@@ -177,11 +268,31 @@ def test_resolves_workplace_context(
     org_id, employee_id = org_with_employee
     _grant(workplace_kernel, MANAGER_ROLE, org_id)
     workplace_id = _make_workplace(
-        workplace_kernel, org_id, code="PLANT-7", kind=WorkplaceType.PLANT
+        workplace_kernel,
+        org_id,
+        code="PLANT-7",
+        kind=WorkplaceType.PLANT,
+        execution_handle=_context(
+            workplace_kernel, org_id, capability=WORKPLACE_MANAGE, action="workplace.create"
+        ),
     )
-    _add_member(workplace_kernel, workplace_id, employee_id)
+    _add_member(
+        workplace_kernel,
+        workplace_id,
+        employee_id,
+        execution_handle=_context(
+            workplace_kernel,
+            org_id,
+            capability=WORKPLACE_MANAGE,
+            action="workplace.workforce.add",
+            resource_id=workplace_id,
+        ),
+    )
 
-    context = _plugin(workplace_kernel).resolve_context(workplace_id)
+    context = _plugin(workplace_kernel).resolve_workplace_context(
+        workplace_id,
+        execution_handle=_context(workplace_kernel, org_id, resource_id=workplace_id),
+    )
 
     assert context.workplace_id == workplace_id
     assert context.code == "PLANT-7"
@@ -196,8 +307,25 @@ def test_direct_workplace_reads_run_through_the_platform_runner(
 ) -> None:
     org_id, employee_id = org_with_employee
     _grant(workplace_kernel, MANAGER_ROLE, org_id)
-    workplace_id = _make_workplace(workplace_kernel, org_id)
-    _add_member(workplace_kernel, workplace_id, employee_id)
+    workplace_id = _make_workplace(
+        workplace_kernel,
+        org_id,
+        execution_handle=_context(
+            workplace_kernel, org_id, capability=WORKPLACE_MANAGE, action="workplace.create"
+        ),
+    )
+    _add_member(
+        workplace_kernel,
+        workplace_id,
+        employee_id,
+        execution_handle=_context(
+            workplace_kernel,
+            org_id,
+            capability=WORKPLACE_MANAGE,
+            action="workplace.workforce.add",
+            resource_id=workplace_id,
+        ),
+    )
     context = workplace_kernel.context_for("workplace_operations")
     calls = 0
     original_run = context.transactions.run
@@ -210,9 +338,10 @@ def test_direct_workplace_reads_run_through_the_platform_runner(
     monkeypatch.setattr(context.transactions, "run", tracked_run)
 
     plugin = _plugin(workplace_kernel)
-    plugin.list_workplaces(organization_id=org_id)
-    plugin.list_workforce(workplace_id)
-    plugin.resolve_context(workplace_id)
+    view_context = _context(workplace_kernel, org_id, resource_id=workplace_id)
+    plugin.list_workplaces(organization_id=org_id, execution_handle=view_context)
+    plugin.list_workforce(workplace_id, execution_handle=view_context)
+    plugin.resolve_workplace_context(workplace_id, execution_handle=view_context)
 
     assert calls == 3
 
@@ -222,17 +351,49 @@ def test_removes_a_workforce_member(
 ) -> None:
     org_id, employee_id = org_with_employee
     _grant(workplace_kernel, MANAGER_ROLE, org_id)
-    workplace_id = _make_workplace(workplace_kernel, org_id)
-    _add_member(workplace_kernel, workplace_id, employee_id)
-    assert len(_plugin(workplace_kernel).list_workforce(workplace_id)) == 1
+    workplace_id = _make_workplace(
+        workplace_kernel,
+        org_id,
+        execution_handle=_context(
+            workplace_kernel, org_id, capability=WORKPLACE_MANAGE, action="workplace.create"
+        ),
+    )
+    _add_member(
+        workplace_kernel,
+        workplace_id,
+        employee_id,
+        execution_handle=_context(
+            workplace_kernel,
+            org_id,
+            capability=WORKPLACE_MANAGE,
+            action="workplace.workforce.add",
+            resource_id=workplace_id,
+        ),
+    )
+    view_context = _context(workplace_kernel, org_id, resource_id=workplace_id)
+    assert (
+        len(_plugin(workplace_kernel).list_workforce(workplace_id, execution_handle=view_context))
+        == 1
+    )
 
     _plugin(workplace_kernel).remove_workforce_member(
-        WorkforceMembershipRequest(
-            workplace_id=workplace_id, employee_id=employee_id, actor_id=ACTOR
+        WorkforceMembershipRequest(workplace_id=workplace_id, employee_id=employee_id),
+        execution_handle=_context(
+            workplace_kernel,
+            org_id,
+            capability=WORKPLACE_MANAGE,
+            action="workplace.workforce.remove",
+            resource_id=workplace_id,
         ),
     )
 
-    assert _plugin(workplace_kernel).list_workforce(workplace_id) == []
+    assert (
+        _plugin(workplace_kernel).list_workforce(
+            workplace_id,
+            execution_handle=view_context,
+        )
+        == []
+    )
 
 
 # --- contracts (Gate G, and the composable extension of Gate O) -------------
@@ -244,14 +405,37 @@ def test_workforce_contract_answers_through_the_registry(
 ) -> None:
     org_id, employee_id = org_with_employee
     _grant(workplace_kernel, MANAGER_ROLE, org_id)
-    workplace_id = _make_workplace(workplace_kernel, org_id)
-    _add_member(workplace_kernel, workplace_id, employee_id)
+    workplace_id = _make_workplace(
+        workplace_kernel,
+        org_id,
+        execution_handle=_context(
+            workplace_kernel, org_id, capability=WORKPLACE_MANAGE, action="workplace.create"
+        ),
+    )
+    _add_member(
+        workplace_kernel,
+        workplace_id,
+        employee_id,
+        execution_handle=_context(
+            workplace_kernel,
+            org_id,
+            capability=WORKPLACE_MANAGE,
+            action="workplace.workforce.add",
+            resource_id=workplace_id,
+        ),
+    )
 
     members = cast(
         "list[WorkplaceMember]",
         workplace_kernel.registries.contracts.invoke(
             WORKPLACE_WORKFORCE_CONTRACT,
-            WorkforceRequest(workplace_id=workplace_id, actor_id=ACTOR),
+            WorkforceRequest(workplace_id=workplace_id),
+            execution_handle=_context(
+                workplace_kernel,
+                org_id,
+                action="workplace.workforce.read",
+                resource_id=workplace_id,
+            ),
         ),
     )
 
@@ -265,14 +449,37 @@ def test_context_contract_answers_through_the_registry(
 ) -> None:
     org_id, employee_id = org_with_employee
     _grant(workplace_kernel, MANAGER_ROLE, org_id)
-    workplace_id = _make_workplace(workplace_kernel, org_id)
-    _add_member(workplace_kernel, workplace_id, employee_id)
+    workplace_id = _make_workplace(
+        workplace_kernel,
+        org_id,
+        execution_handle=_context(
+            workplace_kernel, org_id, capability=WORKPLACE_MANAGE, action="workplace.create"
+        ),
+    )
+    _add_member(
+        workplace_kernel,
+        workplace_id,
+        employee_id,
+        execution_handle=_context(
+            workplace_kernel,
+            org_id,
+            capability=WORKPLACE_MANAGE,
+            action="workplace.workforce.add",
+            resource_id=workplace_id,
+        ),
+    )
 
     context = cast(
         "WorkplaceContext",
         workplace_kernel.registries.contracts.invoke(
             WORKPLACE_CONTEXT_CONTRACT,
-            WorkplaceContextRequest(workplace_id=workplace_id, actor_id=ACTOR),
+            WorkplaceContextRequest(workplace_id=workplace_id),
+            execution_handle=_context(
+                workplace_kernel,
+                org_id,
+                action="workplace.context.read",
+                resource_id=workplace_id,
+            ),
         ),
     )
 
@@ -289,7 +496,13 @@ def test_creating_a_workplace_publishes_the_created_event(
 ) -> None:
     org_id, _employee_id = org_with_employee
     _grant(workplace_kernel, MANAGER_ROLE, org_id)
-    _make_workplace(workplace_kernel, org_id)
+    _make_workplace(
+        workplace_kernel,
+        org_id,
+        execution_handle=_context(
+            workplace_kernel, org_id, capability=WORKPLACE_MANAGE, action="workplace.create"
+        ),
+    )
     workplace_kernel.dispatcher.dispatch_pending()
 
     assert workplace_kernel.registries.events.publishers_of(WORKPLACE_CREATED) == [
@@ -303,8 +516,25 @@ def test_changing_the_workforce_publishes_a_transactional_event(
 ) -> None:
     org_id, employee_id = org_with_employee
     _grant(workplace_kernel, MANAGER_ROLE, org_id)
-    workplace_id = _make_workplace(workplace_kernel, org_id)
-    _add_member(workplace_kernel, workplace_id, employee_id)
+    workplace_id = _make_workplace(
+        workplace_kernel,
+        org_id,
+        execution_handle=_context(
+            workplace_kernel, org_id, capability=WORKPLACE_MANAGE, action="workplace.create"
+        ),
+    )
+    _add_member(
+        workplace_kernel,
+        workplace_id,
+        employee_id,
+        execution_handle=_context(
+            workplace_kernel,
+            org_id,
+            capability=WORKPLACE_MANAGE,
+            action="workplace.workforce.add",
+            resource_id=workplace_id,
+        ),
+    )
     workplace_kernel.dispatcher.dispatch_pending()
 
     assert workplace_kernel.registries.events.exists(WORKPLACE_WORKFORCE_CHANGED)
@@ -323,7 +553,13 @@ def test_creating_a_workplace_requires_the_capability(
     org_id, _employee_id = org_with_employee
     # No grant.
     with pytest.raises(AuthorizationError):
-        _make_workplace(workplace_kernel, org_id)
+        _make_workplace(
+            workplace_kernel,
+            org_id,
+            execution_handle=_context(
+                workplace_kernel, org_id, capability=WORKPLACE_MANAGE, action="workplace.create"
+            ),
+        )
 
 
 def test_viewing_the_workforce_requires_the_view_capability(
@@ -332,13 +568,37 @@ def test_viewing_the_workforce_requires_the_view_capability(
 ) -> None:
     org_id, employee_id = org_with_employee
     _grant(workplace_kernel, MANAGER_ROLE, org_id)
-    workplace_id = _make_workplace(workplace_kernel, org_id)
-    _add_member(workplace_kernel, workplace_id, employee_id)
+    workplace_id = _make_workplace(
+        workplace_kernel,
+        org_id,
+        execution_handle=_context(
+            workplace_kernel, org_id, capability=WORKPLACE_MANAGE, action="workplace.create"
+        ),
+    )
+    _add_member(
+        workplace_kernel,
+        workplace_id,
+        employee_id,
+        execution_handle=_context(
+            workplace_kernel,
+            org_id,
+            capability=WORKPLACE_MANAGE,
+            action="workplace.workforce.add",
+            resource_id=workplace_id,
+        ),
+    )
 
     with pytest.raises(AuthorizationError):
         workplace_kernel.registries.contracts.invoke(
             WORKPLACE_WORKFORCE_CONTRACT,
-            WorkforceRequest(workplace_id=workplace_id, actor_id="user.unauthorized"),
+            WorkforceRequest(workplace_id=workplace_id),
+            execution_handle=_context(
+                workplace_kernel,
+                org_id,
+                actor="user.unauthorized",
+                action="workplace.workforce.read",
+                resource_id=workplace_id,
+            ),
         )
 
 
@@ -347,11 +607,21 @@ def test_an_actor_scoped_elsewhere_cannot_touch_this_org(
     org_with_employee: tuple[str, str],
 ) -> None:
     org_id, _employee_id = org_with_employee
-    context = workplace_kernel.context_for("workplace_operations")
-    context.authorization.grant(ACTOR, MANAGER_ROLE, context.scope.resolve("org_foreign"))
+    assign_role_for_test(
+        workplace_kernel,
+        ACTOR,
+        MANAGER_ROLE,
+        workplace_kernel.context_for("workplace_operations").scope.resolve("org_foreign"),
+    )
 
     with pytest.raises(AuthorizationError):
-        _make_workplace(workplace_kernel, org_id)
+        _make_workplace(
+            workplace_kernel,
+            org_id,
+            execution_handle=_context(
+                workplace_kernel, org_id, capability=WORKPLACE_MANAGE, action="workplace.create"
+            ),
+        )
 
 
 # --- audit (Gate L) ---------------------------------------------------------
@@ -363,10 +633,20 @@ def test_workplace_operations_write_audit_records(
 ) -> None:
     org_id, _employee_id = org_with_employee
     _grant(workplace_kernel, MANAGER_ROLE, org_id)
-    _make_workplace(workplace_kernel, org_id)
+    _make_workplace(
+        workplace_kernel,
+        org_id,
+        execution_handle=_context(
+            workplace_kernel, org_id, capability=WORKPLACE_MANAGE, action="workplace.create"
+        ),
+    )
 
     # The plugin audits through its own context; read it back the same way.
     context = workplace_kernel.context_for("workplace_operations")
-    records = context.audit.list_records(organization_id=org_id, limit=20)
+    records = context.audit.list_records(
+        organization_id=org_id,
+        limit=20,
+        execution_handle=_context(workplace_kernel, org_id),
+    )
 
     assert any(r.action.startswith("workplace.") for r in records)

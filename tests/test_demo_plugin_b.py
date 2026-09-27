@@ -11,14 +11,25 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
+from tests.conftest import (
+    assign_role_for_test,
+    issue_handle_for_test,
+    issue_uow_handle_for_test,
+)
 
 from atlas_core.application.organization import OrganizationService
 from atlas_core.application.people import PeopleService
 from atlas_core.application.unit_of_work import UnitOfWorkPort
+from atlas_core.domain.role import (
+    AUDIT_READ,
+    ORGANIZATION_MANAGE,
+    PEOPLE_EMPLOYEE_CREATE,
+    PEOPLE_EMPLOYEE_READ,
+)
 from atlas_core.infrastructure.events import OutboxEventPublisher
 from atlas_core.kernel import Kernel
 from atlas_plugins.atlas_demo_consumer import AtlasDemoConsumerPlugin
-from atlas_sdk import AuthorizationError
+from atlas_sdk import AuthorizationError, CapabilityId, Scope
 
 ACTOR = "user.demo_admin"
 
@@ -34,18 +45,62 @@ def both(real_kernel: Kernel) -> Kernel:
 @pytest.fixture
 def org_with_employee(uow_factory: Callable[[], UnitOfWorkPort]) -> tuple[str, str]:
     with uow_factory() as uow:
-        org = OrganizationService(uow).create_organization(name="Acme", code="ACME")
+        org_handle = issue_uow_handle_for_test(
+            uow_factory,
+            ORGANIZATION_MANAGE,
+            "organization.create",
+            Scope(principal_id="seed.consumer"),
+            principal_id="seed.consumer",
+        )
+        org = OrganizationService(uow).create_organization(
+            name="Acme", code="ACME", execution_handle=org_handle
+        )
+        employee_handle = issue_uow_handle_for_test(
+            uow_factory,
+            PEOPLE_EMPLOYEE_CREATE,
+            "people.employee.create",
+            Scope(organization_id=org.organization_id),
+        )
         employee = PeopleService(uow, OutboxEventPublisher(uow, publisher="seed")).create_employee(
             full_name="Ada Lovelace",
             employee_number="EMP-1",
             organization_id=org.organization_id,
+            execution_handle=employee_handle,
         )
     return org.organization_id, employee.employee_id
 
 
 def _grant(kernel: Kernel, org_id: str) -> None:
-    context = kernel.context_for("atlas_demo")
-    context.authorization.grant(ACTOR, "role.demo_greeter", context.scope.resolve(org_id))
+    assign_role_for_test(
+        kernel,
+        ACTOR,
+        "role.demo_greeter",
+        kernel.context_for("atlas_demo").scope.resolve(org_id),
+    )
+    kernel.authorization_management.grant_capability(
+        ACTOR,
+        PEOPLE_EMPLOYEE_READ,
+        kernel.context_for("atlas_demo").scope.resolve(org_id),
+        actor="tests",
+    )
+    kernel.authorization_management.grant_capability(
+        ACTOR,
+        AUDIT_READ,
+        kernel.context_for("atlas_demo").scope.resolve(org_id),
+        actor="tests",
+    )
+
+
+def _context(kernel: Kernel, org_id: str, *, actor: str = ACTOR):
+    return issue_handle_for_test(
+        kernel,
+        actor,
+        CapabilityId("demo.greet"),
+        "demo.greet",
+        kernel.context_for("atlas_demo_consumer").scope.resolve(org_id),
+        resource_id="greeting",
+        additional_capabilities=(PEOPLE_EMPLOYEE_READ, AUDIT_READ),
+    )
 
 
 def _consumer(kernel: Kernel) -> AtlasDemoConsumerPlugin:
@@ -62,7 +117,11 @@ def test_b_consumes_as_contract_without_importing_a(
     org_id, employee_id = org_with_employee
     _grant(both, org_id)
 
-    result = _consumer(both).call_greeting(employee_id, ACTOR, org_id)
+    result = _consumer(both).call_greeting(
+        employee_id,
+        org_id,
+        execution_handle=_context(both, org_id),
+    )
 
     # B sees only the contract's structural promise: a greeting text and an id.
     assert getattr(result, "greeting", None) == "Hello, Ada Lovelace!"
@@ -107,7 +166,11 @@ def test_consumer_is_denied_when_actor_lacks_the_capability(
     """Gate M at the inter-plugin boundary: no grant, no greeting."""
     org_id, employee_id = org_with_employee
     with pytest.raises(AuthorizationError):
-        _consumer(both).call_greeting(employee_id, ACTOR, org_id)
+        _consumer(both).call_greeting(
+            employee_id,
+            org_id,
+            execution_handle=_context(both, org_id),
+        )
 
 
 def test_consumer_observes_the_event_the_provider_published(
@@ -118,7 +181,11 @@ def test_consumer_observes_the_event_the_provider_published(
     org_id, employee_id = org_with_employee
     _grant(both, org_id)
 
-    _consumer(both).call_greeting(employee_id, ACTOR, org_id)
+    _consumer(both).call_greeting(
+        employee_id,
+        org_id,
+        execution_handle=_context(both, org_id),
+    )
     both.dispatcher.dispatch_pending()
 
     observed = _consumer(both).observed

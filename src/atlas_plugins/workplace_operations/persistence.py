@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 
-from sqlalchemy import ForeignKey, MetaData, String, UniqueConstraint, select
+from sqlalchemy import ForeignKey, MetaData, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from atlas_sdk import PluginPersistencePort, WorkplaceType
@@ -105,7 +105,7 @@ class WorkplaceOperationsRepository:
         DDL runs on a short-lived engine connection that closes immediately,
         rather than retaining the shared transaction session.
         """
-        self._persistence.create_schema(Base.metadata)
+        self._persistence.create_tables(WorkplaceORM, WorkforceMembershipORM)
 
     # --- workplaces --------------------------------------------------------
 
@@ -116,23 +116,23 @@ class WorkplaceOperationsRepository:
         return self._persistence.get(WorkplaceORM, workplace_id)
 
     def find_by_code(self, organization_id: str, code: str) -> WorkplaceORM | None:
-        stmt = select(WorkplaceORM).where(
-            WorkplaceORM.organization_id == organization_id,
-            WorkplaceORM.code == code,
+        return self._persistence.find(
+            WorkplaceORM,
+            organization_id=organization_id,
+            code=code,
         )
-        return next(iter(self._persistence.query(stmt)), None)
 
     def list_workplaces(
         self,
         organization_id: str | None = None,
         kind: WorkplaceType | None = None,
     ) -> list[WorkplaceORM]:
-        stmt = select(WorkplaceORM)
+        filters: dict[str, object] = {}
         if organization_id is not None:
-            stmt = stmt.where(WorkplaceORM.organization_id == organization_id)
+            filters["organization_id"] = organization_id
         if kind is not None:
-            stmt = stmt.where(WorkplaceORM.kind == kind.value)
-        return list(self._persistence.query(stmt))
+            filters["kind"] = kind.value
+        return self._persistence.all(WorkplaceORM, **filters)
 
     # --- workforce membership ----------------------------------------------
 
@@ -146,26 +146,23 @@ class WorkplaceOperationsRepository:
             self._persistence.delete(row)
 
     def get_membership(self, workplace_id: str, employee_id: str) -> WorkforceMembershipORM | None:
-        stmt = select(WorkforceMembershipORM).where(
-            WorkforceMembershipORM.workplace_id == workplace_id,
-            WorkforceMembershipORM.employee_id == employee_id,
+        return self._persistence.find(
+            WorkforceMembershipORM,
+            workplace_id=workplace_id,
+            employee_id=employee_id,
         )
-        return next(iter(self._persistence.query(stmt)), None)
 
     def list_memberships(self, workplace_id: str) -> list[WorkforceMembershipORM]:
-        stmt = select(WorkforceMembershipORM).where(
-            WorkforceMembershipORM.workplace_id == workplace_id,
-        )
-        return list(self._persistence.query(stmt))
+        return self._persistence.all(WorkforceMembershipORM, workplace_id=workplace_id)
 
     def list_memberships_for_organization(
         self,
         organization_id: str,
     ) -> list[WorkforceMembershipORM]:
-        stmt = select(WorkforceMembershipORM).where(
-            WorkforceMembershipORM.organization_id == organization_id,
+        return self._persistence.all(
+            WorkforceMembershipORM,
+            organization_id=organization_id,
         )
-        return list(self._persistence.query(stmt))
 
 
 __all__ = [

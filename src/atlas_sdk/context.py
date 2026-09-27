@@ -1,32 +1,25 @@
-"""The plugin context: the single handle a plugin receives (contract section 2).
+"""The plugin-facing SDK context.
 
-``PluginContext`` bundles the core application services a plugin may call, plus
-the scope it runs in and the event publisher it writes through. Plugins never
-import core internals — they hold a context.
-
-Every service below is a Protocol owned by the SDK; ``atlas_core`` provides the
-implementations. That inversion is the whole point of the hexagonal boundary:
-core depends on the SDK's published language, never the reverse.
+Every public operation carries an opaque :class:`ExecutionHandle`.  The SDK
+never gives a plugin a mutable authority container or a Core session.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Protocol, TypeVar
 
-from .capability import CapabilityId
+from .capability import CapabilityId, CapabilityKind
 from .contract import ContractId
 from .event import DomainEvent, EventId
-from .registry import (
-    CapabilityRegistryPort,
-    ContractRegistryPort,
-    EventRegistryPort,
-)
+from .execution import ExecutionHandle
+from .registry import CapabilityRegistryPort, ContractRegistryPort, EventRegistryPort
 from .types import (
     Assignment,
     AuditEntry,
+    AuthorizationDecision,
     Employee,
     Job,
     Notification,
@@ -42,18 +35,14 @@ T = TypeVar("T")
 
 
 class PluginPersistencePort(Protocol):
-    """Restricted persistence for a plugin-owned table set.
-
-    The adapter shares the platform transaction but exposes only the operations
-    first-party plugins need for their own tables. It never exposes the raw
-    session or any transaction lifecycle method.
-    """
+    """Owner-scoped persistence for one plugin's declared tables."""
 
     def add(self, entity: object) -> None: ...
     def delete(self, entity: object) -> None: ...
     def get(self, entity_type: type[Any], entity_id: object) -> Any | None: ...
-    def query(self, statement: Any) -> Iterable[Any]: ...
-    def create_schema(self, metadata: Any) -> None: ...
+    def find(self, entity_type: type[Any], **filters: object) -> Any | None: ...
+    def all(self, entity_type: type[Any], **filters: object) -> list[Any]: ...
+    def create_tables(self, *entity_types: type[Any]) -> None: ...
 
 
 class TransactionRunnerPort(Protocol):
@@ -68,22 +57,52 @@ class PeoplePort(Protocol):
         full_name: str,
         employee_number: str,
         organization_id: str,
+        *,
+        execution_handle: ExecutionHandle,
     ) -> Employee: ...
 
-    def get_employee(self, employee_id: str) -> Employee | None: ...
-    def list_employees(self, organization_id: str | None = None) -> list[Employee]: ...
+    def get_employee(
+        self,
+        employee_id: str,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> Employee | None: ...
+    def list_employees(
+        self,
+        organization_id: str | None = None,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> list[Employee]: ...
 
 
 class OrganizationPort(Protocol):
-    def create_organization(self, name: str, code: str) -> Organization: ...
-    def get_organization(self, organization_id: str) -> Organization | None: ...
+    def create_organization(
+        self,
+        name: str,
+        code: str,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> Organization: ...
+    def get_organization(
+        self,
+        organization_id: str,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> Organization | None: ...
     def add_workplace(
         self,
         organization_id: str,
         name: str,
         kind: WorkplaceType = WorkplaceType.OFFICE,
+        *,
+        execution_handle: ExecutionHandle,
     ) -> Workplace: ...
-    def list_workplaces(self, organization_id: str) -> list[Workplace]: ...
+    def list_workplaces(
+        self,
+        organization_id: str,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> list[Workplace]: ...
 
 
 class JobsPort(Protocol):
@@ -92,10 +111,21 @@ class JobsPort(Protocol):
         organization_id: str,
         title: str,
         workplace_id: str | None = None,
+        *,
+        execution_handle: ExecutionHandle,
     ) -> Job: ...
-
-    def get_job(self, job_id: str) -> Job | None: ...
-    def list_jobs(self, organization_id: str) -> list[Job]: ...
+    def get_job(
+        self,
+        job_id: str,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> Job | None: ...
+    def list_jobs(
+        self,
+        organization_id: str,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> list[Job]: ...
 
 
 class AssignmentPort(Protocol):
@@ -105,19 +135,60 @@ class AssignmentPort(Protocol):
         job_id: str,
         workplace_id: str | None = None,
         start_date: date | None = None,
+        *,
+        execution_handle: ExecutionHandle,
     ) -> Assignment: ...
-
-    def get_assignment(self, assignment_id: str) -> Assignment | None: ...
-    def assignments_for(self, employee_id: str) -> list[Assignment]: ...
+    def get_assignment(
+        self,
+        assignment_id: str,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> Assignment | None: ...
+    def assignments_for(
+        self,
+        employee_id: str,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> list[Assignment]: ...
 
 
 class AuthorizationPort(Protocol):
-    def check(self, capability: CapabilityId, scope: Scope, subject_id: str) -> bool:
-        """True if ``subject_id`` may exercise ``capability`` within ``scope``."""
+    def authorize(
+        self,
+        handle: ExecutionHandle,
+        capability: CapabilityId,
+        requested_scope: Scope,
+        *,
+        confirmation_id: str | None = None,
+        requested_action: str | None = None,
+        requested_resource_id: str | None = None,
+    ) -> AuthorizationDecision:
+        """Resolve Core facts and return a typed, audited decision."""
         ...
 
-    def grant(self, subject_id: str, role: str, scope: Scope) -> None:
-        """Assign ``role`` to ``subject_id`` within ``scope``."""
+    def register_capability(
+        self,
+        capability: CapabilityId,
+        kind: CapabilityKind = CapabilityKind.VIEW,
+        name: str = "",
+        metadata: Mapping[str, object] | None = None,
+    ) -> None:
+        """Declare capability metadata; this never grants it to a principal."""
+        ...
+
+    def resolve_identity(self, identity_id: str) -> str | None:
+        """Resolve a linked trusted identity without granting permission."""
+        ...
+
+    def resolve_principal(self, handle: ExecutionHandle) -> str | None:
+        """The principal Core resolved for a valid handle, or ``None``.
+
+        A handle is opaque, so a self-scoped read cannot know whose rows it may
+        return. Core answers exactly that one question and nothing else: no
+        scope, channel, action, capability set, or policy context. Anything the
+        plugin is about to be *allowed* to do still goes through
+        :meth:`authorize`.
+        """
         ...
 
     def register_role(
@@ -126,13 +197,7 @@ class AuthorizationPort(Protocol):
         name: str,
         capabilities: frozenset[CapabilityId],
     ) -> None:
-        """Publish a role through which a plugin's own capabilities can be granted.
-
-        A plugin declares a capability in its manifest, but before an
-        administrator can grant that capability to anybody a role carrying it has
-        to exist. Plugins call this at initialize time; the platform's own roles
-        are seeded by the core. Calling twice with the same id is a refresh.
-        """
+        """Declare a Core-validated role bundle; assignment remains Core-only."""
         ...
 
 
@@ -141,34 +206,19 @@ class ScopePort(Protocol):
         self,
         organization_id: str | None,
         workplace_id: str | None = None,
-    ) -> Scope:
-        """Build a scope value from raw ids."""
-        ...
-
-    def narrow(self, requested: Scope, subject: Scope) -> Scope:
-        """Intersect the scope an operation wants with the scope an actor may see.
-
-        The result never grants more than ``subject``. Disjoint scopes yield an
-        empty scope (``organization_id is None``), which queries treat as
-        "nothing visible".
-        """
-        ...
+        principal_id: str | None = None,
+    ) -> Scope: ...
+    def narrow(self, requested: Scope, subject: Scope) -> Scope: ...
 
 
 class PolicyPort(Protocol):
-    def register(
+    def evaluate(
         self,
-        policy_id: str,
-        effective_from: date,
-        effective_to: date | None = None,
-        enabled: bool = True,
-        condition: Mapping[str, str] | None = None,
-    ) -> None:
-        """Register an effective-dated policy."""
-        ...
-
-    def evaluate(self, policy_id: str, on: date, facts: Mapping[str, object]) -> bool:
-        """True if the policy is in effect on ``on`` and ``facts`` satisfy it."""
+        handle: ExecutionHandle,
+        capability: CapabilityId,
+        requested_scope: Scope,
+    ) -> bool:
+        """Read-only policy evaluation; registration is Core-only."""
         ...
 
 
@@ -176,17 +226,16 @@ class AuditPort(Protocol):
     def record(
         self,
         action: str,
-        actor: str,
-        scope: Scope | None = None,
         details: Mapping[str, object] | None = None,
-    ) -> str:
-        """Append one audit record and return its id."""
-        ...
-
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> str: ...
     def list_records(
         self,
         organization_id: str | None = None,
         limit: int = 100,
+        *,
+        execution_handle: ExecutionHandle,
     ) -> list[AuditEntry]: ...
 
 
@@ -196,20 +245,30 @@ class WorkflowPort(Protocol):
         workflow_id: str,
         initial_state: str,
         transitions: Mapping[str, Sequence[str]],
-    ) -> None:
-        """Register a state machine: allowed transitions keyed by source state."""
-
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> None: ...
     def start(
         self,
         workflow_id: str,
         entity_id: str,
         case_input: Mapping[str, object] | None = None,
-    ) -> str:
-        """Start a workflow case for ``entity_id``; returns the case id."""
-        ...
-
-    def transition(self, case_id: str, to_state: str) -> None: ...
-    def get_case(self, case_id: str) -> WorkflowCase | None: ...
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> str: ...
+    def transition(
+        self,
+        case_id: str,
+        to_state: str,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> None: ...
+    def get_case(
+        self,
+        case_id: str,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> WorkflowCase | None: ...
 
 
 class NotificationPort(Protocol):
@@ -219,9 +278,15 @@ class NotificationPort(Protocol):
         recipient: str,
         subject: str,
         body: str,
+        *,
+        execution_handle: ExecutionHandle,
     ) -> str: ...
-
-    def list_sent(self, recipient: str | None = None) -> list[Notification]: ...
+    def list_sent(
+        self,
+        recipient: str | None = None,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> list[Notification]: ...
 
 
 class SchedulingPort(Protocol):
@@ -230,52 +295,58 @@ class SchedulingPort(Protocol):
         key: str,
         run_at: datetime,
         payload: Mapping[str, object] | None = None,
+        *,
+        execution_handle: ExecutionHandle,
     ) -> str: ...
-
-    def due(self, now: datetime | None = None) -> list[ScheduledJob]: ...
+    def due(
+        self,
+        now: datetime | None = None,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> list[ScheduledJob]: ...
 
 
 class EventPublisherPort(Protocol):
-    def publish(self, event: DomainEvent) -> None:
-        """Append an event to the outbox of the current transaction."""
+    def publish(self, event: DomainEvent, *, execution_handle: ExecutionHandle) -> None: ...
 
 
 class EventDispatcherPort(Protocol):
-    """In-process event subscription (contract section 21).
-
-    Plugins subscribe to the *event id* string of another plugin's event. They
-    never import the publishing plugin, and the publisher has no way to know who
-    is listening — the registry is the only channel (contract section 9).
-    """
-
-    def subscribe(self, event_id: EventId, subscriber: Callable[[DomainEvent], None]) -> None:
-        """Register ``subscriber`` to be called whenever ``event_id`` is dispatched."""
-        ...
-
-    def unsubscribe(self, event_id: EventId, subscriber: Callable[[DomainEvent], None]) -> None: ...
+    def subscribe(
+        self,
+        event_id: EventId,
+        subscriber: Callable[[DomainEvent], None],
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> None: ...
+    def unsubscribe(
+        self,
+        event_id: EventId,
+        subscriber: Callable[[DomainEvent], None],
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> None: ...
 
 
 class ContractInvokerPort(Protocol):
-    """Call a contract provided by *some* plugin, discovered by id (§9, §13).
-
-    The caller never knows which plugin implements the contract. The registry
-    resolves the declaration; this port runs the bound instance. Invoking an
-    unbound contract — no enabled plugin provides it — raises
-    :class:`~atlas_sdk.NotFoundError`.
-    """
-
-    def invoke(self, contract_id: ContractId, request: object) -> object:
-        """Run the single enabled implementation of ``contract_id``."""
-        ...
-
-    def invoke_all(self, contract_id: ContractId, request: object) -> list[object]:
-        """Run every enabled implementation; composability (contract section 13)."""
-        ...
+    def invoke(
+        self,
+        contract_id: ContractId,
+        request: object,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> object: ...
+    def invoke_all(
+        self,
+        contract_id: ContractId,
+        request: object,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> list[object]: ...
 
 
 @dataclass(frozen=True)
 class PluginContext:
-    """Everything a plugin may reach. Plugins import this package, not core."""
+    """Everything a plugin may reach; all authority enters through a handle."""
 
     plugin_id: str
     people: PeoplePort
@@ -295,11 +366,7 @@ class PluginContext:
     capabilities: CapabilityRegistryPort
     contracts: ContractRegistryPort
     events_registry: EventRegistryPort
-    #: Restricted persistence for the plugin's own tables. It shares the
-    #: platform transaction without exposing the raw session or its lifecycle.
     persistence: PluginPersistencePort
-    #: The one transaction seam a plugin uses for a direct write. The platform
-    #: owns begin, commit, and rollback around the supplied operation.
     transactions: TransactionRunnerPort
 
 
@@ -312,13 +379,13 @@ __all__ = [
     "EventPublisherPort",
     "JobsPort",
     "NotificationPort",
+    "OrganizationPort",
     "PeoplePort",
     "PluginContext",
+    "PluginPersistencePort",
     "PolicyPort",
     "SchedulingPort",
     "ScopePort",
-    "PluginPersistencePort",
     "TransactionRunnerPort",
     "WorkflowPort",
-    "OrganizationPort",
 ]

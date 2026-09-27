@@ -24,6 +24,7 @@ from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.schema import CreateSchema, DropSchema
 
+from .migrations import apply_migrations
 from .orm import Base
 
 ENV_VAR = "ATLAS_DATABASE_URL"
@@ -141,6 +142,7 @@ def ensure_schema(engine: Engine, schema: str | None = None) -> None:
 def create_schema(engine: Engine, schema: str | None = None) -> None:
     """Create the core tables in the configured PostgreSQL schema."""
     ensure_schema(engine, schema)
+    apply_migrations(engine)
     Base.metadata.create_all(engine, checkfirst=True)
 
 

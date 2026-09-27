@@ -12,6 +12,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from tests.conftest import opaque_handle_for_test
 from tests.synthetic import (
     TEST_ENTRY_POINT_GROUP,
     refresh_metadata_cache,
@@ -41,7 +42,6 @@ def _write_broken_init(directory: Path) -> None:
         f"        cluster_id={GOVERNANCE!r},\n"
         "    )\n"
         "    def initialize(self, context):\n"
-        "        context.audit.record(action='broken.init', actor='test')\n"
         "        raise RuntimeError('initialize exploded')\n",
         encoding="utf-8",
     )
@@ -91,14 +91,11 @@ def _write_cancelled_plugin(directory: Path, *, plugin_id: str, phase: str) -> N
     module_name = f"synthetic_{plugin_id.replace('.', '_')}"
     contract_id = f"{plugin_id}.contract"
     init_body = (
-        "        self.context = context\n"
-        "        self.context.audit.record(action='cancel.initialize', actor='test')\n"
-        "        raise Cancelled('initialize cancelled')\n"
+        "        self.context = context\n        raise Cancelled('initialize cancelled')\n"
         if phase == "initialize"
         else "        self.context = context\n"
     )
     enable_body = (
-        "        self.context.audit.record(action='cancel.enable', actor='test')\n"
         "        raise Cancelled('on_enable cancelled')\n"
         if phase == "on_enable"
         else "        return None\n"
@@ -226,6 +223,7 @@ def test_enabling_a_plugin_that_failed_at_boot_reports_the_reason(
 def test_a_plugin_that_fails_initialize_is_marked_failed_and_isolated(
     kernel: Kernel,
     isolated_plugins: Path,
+    uow_factory,
 ) -> None:
     """A broken initialize leaves no live instance behind (contract section 18)."""
     _write_broken_init(isolated_plugins)
@@ -238,10 +236,8 @@ def test_a_plugin_that_fails_initialize_is_marked_failed_and_isolated(
     assert "initialize exploded" in str(excinfo.value)
     assert kernel.registries.plugins.lifecycle_state("broken.init") is PluginLifecycle.FAILED
     assert "broken.init" not in kernel._instances
-    assert not any(
-        record.action == "broken.init"
-        for record in kernel.context_for("broken.init").audit.list_records()
-    )
+    with uow_factory() as uow:
+        assert not any(record.action == "broken.init" for record in uow.audit.all())
 
 
 def test_failed_subscription_binding_unregisters_the_transaction_owner(
@@ -262,12 +258,15 @@ def test_failed_subscription_binding_unregisters_the_transaction_owner(
     contract_id = ContractId("broken.bind")
     kernel.registries.contracts.bind(contract_id, "broken.bind", Handler())
     with pytest.raises(RuntimeError, match="no transaction owner"):
-        kernel.registries.contracts.invoke(contract_id, object())
+        kernel.registries.contracts.invoke(
+            contract_id, object(), execution_handle=opaque_handle_for_test()
+        )
 
 
 def test_base_exception_during_initialize_cleans_state_and_owner(
     kernel: Kernel,
     isolated_plugins: Path,
+    uow_factory,
 ) -> None:
     _write_cancelled_plugin(
         isolated_plugins,
@@ -282,8 +281,8 @@ def test_base_exception_during_initialize_cleans_state_and_owner(
 
     assert type(caught.value).__name__ == "Cancelled"
     assert kernel.registries.plugins.lifecycle_state("cancel.initialize") is PluginLifecycle.FAILED
-    context = kernel.context_for("cancel.initialize")
-    assert not any(record.action == "cancel.initialize" for record in context.audit.list_records())
+    with uow_factory() as uow:
+        assert not any(record.action == "cancel.initialize" for record in uow.audit.all())
 
     class Handler:
         def handle(self, request: object) -> object:
@@ -292,12 +291,15 @@ def test_base_exception_during_initialize_cleans_state_and_owner(
     contract_id = ContractId("cancel.initialize.contract")
     kernel.registries.contracts.bind(contract_id, "cancel.initialize", Handler())
     with pytest.raises(RuntimeError, match="no transaction owner"):
-        kernel.registries.contracts.invoke(contract_id, object())
+        kernel.registries.contracts.invoke(
+            contract_id, object(), execution_handle=opaque_handle_for_test()
+        )
 
 
 def test_base_exception_during_on_enable_cleans_state_and_owner(
     kernel: Kernel,
     isolated_plugins: Path,
+    uow_factory,
 ) -> None:
     _write_cancelled_plugin(
         isolated_plugins,
@@ -312,8 +314,8 @@ def test_base_exception_during_on_enable_cleans_state_and_owner(
 
     assert type(caught.value).__name__ == "Cancelled"
     assert kernel.registries.plugins.lifecycle_state("cancel.on_enable") is PluginLifecycle.FAILED
-    context = kernel.context_for("cancel.on_enable")
-    assert not any(record.action == "cancel.enable" for record in context.audit.list_records())
+    with uow_factory() as uow:
+        assert not any(record.action == "cancel.enable" for record in uow.audit.all())
     assert not kernel.registries.contracts.get(ContractId("cancel.on_enable.contract")).is_bound
 
     class Handler:
@@ -323,7 +325,9 @@ def test_base_exception_during_on_enable_cleans_state_and_owner(
     contract_id = ContractId("cancel.on_enable.contract")
     kernel.registries.contracts.bind(contract_id, "cancel.on_enable", Handler())
     with pytest.raises(RuntimeError, match="no transaction owner"):
-        kernel.registries.contracts.invoke(contract_id, object())
+        kernel.registries.contracts.invoke(
+            contract_id, object(), execution_handle=opaque_handle_for_test()
+        )
 
 
 def test_a_failing_plugin_does_not_stop_the_others(
@@ -370,7 +374,9 @@ def test_disable_unbinds_contracts_so_they_stop_being_callable(
     assert kernel.registries.plugins.lifecycle_state("attendance") is PluginLifecycle.DISABLED
     assert not kernel.registries.contracts.get(contract_id).is_bound
     with pytest.raises(NotFoundError):
-        kernel.registries.contracts.invoke(contract_id, object())
+        kernel.registries.contracts.invoke(
+            contract_id, object(), execution_handle=opaque_handle_for_test()
+        )
 
 
 def test_stop_marks_a_plugin_stopped(kernel: Kernel, isolated_plugins: Path) -> None:

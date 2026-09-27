@@ -8,12 +8,13 @@ import pytest
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import Session
 from sqlalchemy.schema import CreateSchema
+from tests.conftest import issue_uow_handle_for_test
 
 from atlas_core.application.organization import OrganizationService
 from atlas_core.application.unit_of_work import UnitOfWorkPort
 from atlas_core.domain.identifiers import OrganizationId
+from atlas_core.domain.role import ORGANIZATION_MANAGE
 from atlas_core.infrastructure.events import OutboxEventPublisher
-from atlas_core.infrastructure.persistence.orm import Base
 from atlas_core.infrastructure.persistence.session import (
     ENV_VAR,
     SessionFactory,
@@ -31,7 +32,8 @@ from atlas_core.infrastructure.persistence.unit_of_work import (
     create_schema as create_uow_schema,
 )
 from atlas_hq.cli import main
-from atlas_sdk import DomainEvent, EventId
+from atlas_plugins.attendance_operations.persistence import AttendanceORM
+from atlas_sdk import CapabilityId, DomainEvent, EventId, Scope
 
 
 def test_database_url_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -81,10 +83,18 @@ def test_pooled_checkout_restores_bound_schema_before_marking_outbox(
             connection.execute(CreateSchema(other_schema, if_not_exists=True))
 
         commit_session = new_session()
+        handle = issue_uow_handle_for_test(
+            lambda: SqlUnitOfWork(factory()),
+            CapabilityId("test.event"),
+            "test.event",
+            Scope(principal_id="pooled"),
+            principal_id="pooled",
+        )
         with SqlUnitOfWork(commit_session) as uow:
             commit_backend = commit_session.scalar(text("SELECT pg_backend_pid()"))
             OutboxEventPublisher(uow).publish(
-                DomainEvent(event_id=EventId("test.pooled_schema"), payload={})
+                DomainEvent(event_id=EventId("test.pooled_schema"), payload={}),
+                execution_handle=handle,
             )
         commit_session.close()
 
@@ -146,10 +156,30 @@ def test_commit_and_rollback_are_real_postgres_transactions(
     uow_factory: Callable[[], UnitOfWorkPort],
 ) -> None:
     with uow_factory() as uow:
-        committed = OrganizationService(uow).create_organization(name="Committed", code="COMMIT")
+        committed = OrganizationService(uow).create_organization(
+            name="Committed",
+            code="COMMIT",
+            execution_handle=issue_uow_handle_for_test(
+                uow_factory,
+                ORGANIZATION_MANAGE,
+                "organization.create",
+                Scope(principal_id="runtime"),
+                principal_id="runtime",
+            ),
+        )
 
     with pytest.raises(RuntimeError), uow_factory() as rolled_back:
-        OrganizationService(rolled_back).create_organization(name="Rolled back", code="ROLLBACK")
+        OrganizationService(rolled_back).create_organization(
+            name="Rolled back",
+            code="ROLLBACK",
+            execution_handle=issue_uow_handle_for_test(
+                uow_factory,
+                ORGANIZATION_MANAGE,
+                "organization.create",
+                Scope(principal_id="runtime.rollback"),
+                principal_id="runtime.rollback",
+            ),
+        )
         raise RuntimeError("force rollback")
 
     with uow_factory() as check:
@@ -161,8 +191,20 @@ def test_state_and_outbox_roll_back_atomically(
     uow_factory: Callable[[], UnitOfWorkPort],
 ) -> None:
     with pytest.raises(RuntimeError), uow_factory() as uow:
-        OrganizationService(uow).create_organization(name="Atomic", code="ATOMIC")
-        OutboxEventPublisher(uow).publish(DomainEvent(event_id=EventId("test.atomic"), payload={}))
+        handle = issue_uow_handle_for_test(
+            uow_factory,
+            ORGANIZATION_MANAGE,
+            "organization.create",
+            Scope(principal_id="runtime.atomic"),
+            principal_id="runtime.atomic",
+        )
+        OrganizationService(uow).create_organization(
+            name="Atomic", code="ATOMIC", execution_handle=handle
+        )
+        OutboxEventPublisher(uow).publish(
+            DomainEvent(event_id=EventId("test.atomic"), payload={}),
+            execution_handle=handle,
+        )
         raise RuntimeError("force rollback")
 
     with uow_factory() as check:
@@ -222,9 +264,20 @@ def test_schema_setup_rejects_an_unbound_session() -> None:
     with pytest.raises(RuntimeError, match="bound"):
         create_uow_schema(Session())
 
-    adapter = PluginPersistenceAdapter(Session())
+    adapter = PluginPersistenceAdapter(
+        Session(),
+        plugin_id="test.plugin",
+        owned_tables=("att_attendance",),
+    )
     with pytest.raises(RuntimeError, match="bound"):
-        adapter.create_schema(Base.metadata)
+        adapter.create_tables(AttendanceORM)
+
+    with pytest.raises(PermissionError, match="Core tables"):
+        PluginPersistenceAdapter(
+            Session(),
+            plugin_id="test.plugin",
+            owned_tables=("organization",),
+        )
 
 
 def test_drop_schema_rejects_non_test_namespaces(database_url: str) -> None:
@@ -257,7 +310,15 @@ def test_two_postgres_schemas_do_not_share_rows(
         create_schema(second_engine, other_schema)
         with SqlUnitOfWork(first_factory()) as first:
             organization = OrganizationService(first).create_organization(
-                name="Isolated", code="ISOLATED"
+                name="Isolated",
+                code="ISOLATED",
+                execution_handle=issue_uow_handle_for_test(
+                    lambda: SqlUnitOfWork(first_factory()),
+                    ORGANIZATION_MANAGE,
+                    "organization.create",
+                    Scope(principal_id="runtime.isolated"),
+                    principal_id="runtime.isolated",
+                ),
             )
         with SqlUnitOfWork(second_factory()) as second:
             assert second.organizations.get(OrganizationId(organization.organization_id)) is None
@@ -278,7 +339,35 @@ def test_cli_report_uses_real_postgres_and_enables_plugins(
 ) -> None:
     with uow_factory() as uow:
         organization = OrganizationService(uow).create_organization(
-            name="CLI Organization", code="CLI"
+            name="CLI Organization",
+            code="CLI",
+            execution_handle=issue_uow_handle_for_test(
+                uow_factory,
+                ORGANIZATION_MANAGE,
+                "organization.create",
+                Scope(principal_id="runtime.cli"),
+                principal_id="runtime.cli",
+            ),
+        )
+    from atlas_core.kernel import Kernel
+    from atlas_hq.cli import LOCAL_OPERATOR_ID
+    from atlas_plugins.report_studio import REPORT_RENDER
+    from atlas_sdk import CapabilityId
+
+    seed_kernel = Kernel(uow_factory=uow_factory)
+    seed_kernel.boot()
+    management = seed_kernel.authorization_management
+    management.create_principal(LOCAL_OPERATOR_ID)
+    for capability, provider in (
+        (REPORT_RENDER, "report_studio"),
+        (CapabilityId("people.employee.read"), "core"),
+        (CapabilityId("workplace.view"), "workplace_operations"),
+        (CapabilityId("attendance.view"), "attendance_operations"),
+        (CapabilityId("audit.read"), "core"),
+    ):
+        management.register_capability(capability, provider_id=provider)
+        management.grant_capability(
+            LOCAL_OPERATOR_ID, capability, Scope(organization_id=organization.organization_id)
         )
     monkeypatch.setenv(ENV_VAR, database_url)
     monkeypatch.setenv("ATLAS_DATABASE_SCHEMA", test_schema)

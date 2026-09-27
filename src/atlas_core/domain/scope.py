@@ -15,10 +15,15 @@ __all__ = ["Scope", "covers", "narrow", "resolve"]
 def covers(broader: Scope, narrower: Scope) -> bool:
     """True if ``broader`` authorises seeing ``narrower``.
 
-    An org-wide scope covers every record of that org, including workplace
-    records. A workplace-scoped view covers only its own workplace. Different
-    orgs never cover each other.
+    Organization/workplace containment keeps its existing behaviour. A
+    principal dimension is a strict self boundary: a self grant never widens
+    into an organization grant, and another principal's self scope never
+    matches.
     """
+    if broader.principal_id is not None and broader.principal_id != narrower.principal_id:
+        return False
+    if narrower.principal_id is not None and broader.principal_id is None:
+        return False
     if broader.organization_id != narrower.organization_id:
         return False
     if broader.workplace_id is None:
@@ -43,8 +48,16 @@ def narrow(requested: Scope, subject: Scope) -> Scope:
     return requested
 
 
-def resolve(organization_id: str | None, workplace_id: str | None = None) -> Scope:
-    """Build a scope from raw ids. ``None`` organization means "no scope"."""
-    if organization_id is None:
+def resolve(
+    organization_id: str | None,
+    workplace_id: str | None = None,
+    principal_id: str | None = None,
+) -> Scope:
+    """Build a scope from raw ids. Empty dimensions mean no access."""
+    if organization_id is None and principal_id is None:
         return Scope()
-    return Scope(organization_id=organization_id, workplace_id=workplace_id)
+    return Scope(
+        organization_id=organization_id,
+        workplace_id=workplace_id,
+        principal_id=principal_id,
+    )

@@ -40,6 +40,7 @@ from atlas_sdk import (
     ContractDeclaration,
     ContractId,
     EventId,
+    ExecutionHandle,
     ModuleDeclaration,
     Plugin,
     PluginManifest,
@@ -80,7 +81,6 @@ class AttendanceRecordRequest:
     workplace_id: str
     date: date
     status: AttendanceStatus = AttendanceStatus.PRESENT
-    actor_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -89,7 +89,6 @@ class DailySummaryRequest:
 
     workplace_id: str
     date: date
-    actor_id: str = ""
 
 
 class AttendanceDailySummaryContract(Contract[DailySummaryRequest, DailySummary]):
@@ -105,11 +104,18 @@ class AttendanceDailySummaryContract(Contract[DailySummaryRequest, DailySummary]
     def __init__(self, service: AttendanceOperationsService) -> None:
         self._service = service
 
-    def handle(self, request: DailySummaryRequest) -> DailySummary:
-        # Gates M/N live on the query too: the caller must be able to view
-        # attendance in the workplace's organization.
-        self._service.assert_summary_visible(request.workplace_id, request.actor_id)
-        return self._service.daily_summary(request.workplace_id, request.date)
+    def handle(
+        self,
+        request: DailySummaryRequest,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> DailySummary:
+        self._service.assert_summary_visible(request.workplace_id, execution_handle)
+        return self._service.daily_summary(
+            request.workplace_id,
+            request.date,
+            execution_handle=execution_handle,
+        )
 
 
 class AttendanceDailySummaryDatasetContract(Contract[DatasetRequest, DatasetResponse]):
@@ -126,8 +132,16 @@ class AttendanceDailySummaryDatasetContract(Contract[DatasetRequest, DatasetResp
     def __init__(self, service: AttendanceOperationsService) -> None:
         self._service = service
 
-    def handle(self, request: DatasetRequest) -> DatasetResponse:
-        return self._service.daily_summary_dataset(request.organization_id)
+    def handle(
+        self,
+        request: DatasetRequest,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> DatasetResponse:
+        return self._service.daily_summary_dataset(
+            request.organization_id,
+            execution_handle=execution_handle,
+        )
 
 
 class AttendanceOperationsPlugin(Plugin):
@@ -151,6 +165,7 @@ class AttendanceOperationsPlugin(Plugin):
             ),
         ),
         provides_capabilities=(ATTENDANCE_MANAGE, ATTENDANCE_VIEW),
+        owned_tables=("att_attendance",),
         consumes_capabilities=(CapabilityId("people.employee.read"),),
         provides_contracts=(
             ContractDeclaration(
@@ -162,7 +177,6 @@ class AttendanceOperationsPlugin(Plugin):
                         "properties": {
                             "workplace_id": {"type": "string"},
                             "date": {"type": "string", "format": "date"},
-                            "actor_id": {"type": "string"},
                         },
                         "required": ["workplace_id", "date"],
                     },
@@ -225,20 +239,35 @@ class AttendanceOperationsPlugin(Plugin):
 
     # --- the plugin's service surface -------------------------------------
 
-    def record_attendance(self, request: AttendanceRecordRequest) -> AttendanceRecord:
+    def record_attendance(
+        self,
+        request: AttendanceRecordRequest,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> AttendanceRecord:
         return self.context.transactions.run(
             lambda: self._service.record_attendance(
                 employee_id=request.employee_id,
                 workplace_id=request.workplace_id,
                 date=request.date,
                 status=request.status,
-                actor=request.actor_id,
+                execution_handle=execution_handle,
             )
         )
 
-    def daily_summary(self, workplace_id: str, record_date: date) -> DailySummary:
+    def daily_summary(
+        self,
+        workplace_id: str,
+        record_date: date,
+        *,
+        execution_handle: ExecutionHandle,
+    ) -> DailySummary:
         return self.context.transactions.run(
-            lambda: self._service.daily_summary(workplace_id, record_date)
+            lambda: self._service.daily_summary(
+                workplace_id,
+                record_date,
+                execution_handle=execution_handle,
+            )
         )
 
 

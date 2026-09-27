@@ -35,7 +35,8 @@ src/atlas_plugins                 │     src/atlas_core
   attendance_operations,          │       application     (services + ports)
   attendance_summary              │       infrastructure (persistence, events,
   construction_reporting,         │                        discovery, registries)
-  report_studio, workforce_summary│       kernel.py        (boot + lifecycle)
+  self_reporting,                  │       kernel.py        (boot + lifecycle)
+  report_studio, workforce_summary  │
   workplace_operations            │
                                   └───────────────┘
 
@@ -60,7 +61,7 @@ src/atlas_plugins                 │     src/atlas_core
 | `atlas_core/application` | application services | `people`, `organization`, `jobs`, `assignments`, `audit`, `authorization`, `scope`, `policy`, `workflow`, `notification`, `scheduling`, `unit_of_work`, `repositories` |
 | `atlas_core/infrastructure` | adapters | `persistence/` (orm, repositories, session, unit_of_work), `events/` (outbox + dispatcher), `discovery/` (entry points), `registry/` (in-memory registries + validation) |
 | `atlas_core/kernel.py` | boot + lifecycle | `Kernel`, `RegistryBundle`, `BootResult` |
-| `atlas_plugins` | shipped plugins | 8 plugins, each one directory, each registered by entry point |
+| `atlas_plugins` | shipped plugins | 9 plugins, each one directory, each registered by entry point |
 | `atlas_hq` | admin shell | `cli.py` — the `atlas-hq` command |
 
 ## How the kernel boots
@@ -143,6 +144,41 @@ Consequences:
 
 See [EVENT_SPEC.md](EVENT_SPEC.md) for the outbox half of this guarantee.
 
+## Core Roles Engine — Core-only mutations
+
+`AuthorizationService` is the single evaluator for explicit capability grants,
+Core-owned role assignments, scope, identity, policy, channel, and typed
+confirmation state. Its PostgreSQL state lives behind the shared
+`UnitOfWorkPort.authorization` repository. A plugin receives only the
+read-oriented `AuthorizationPort`: `authorize(ExecutionHandle, capability,
+scope)` is the single typed, audited action decision seam. The handle is opaque;
+it carries no principal, channel, action, resource, scope, or policy facts.
+
+Role and capability declarations carry an owner. A plugin may declare metadata
+for capabilities in its own manifest, but it cannot overwrite a foreign role or
+capability and it cannot grant, revoke, or assign anything. `Kernel`'s
+`authorization_management` property exposes the Core-only management port;
+it is never added to `PluginContext`.
+
+Every new decision uses a Core-issued `ExecutionHandle`; callers cannot pass
+authentication, channel-enable, policy-selection, or free-form fact booleans.
+Core derives the active principal/identity, selects its policy, canonicalizes
+channel/action/resource facts, and applies all required typed confirmations.
+`PolicyPort` is read-only and policy registration belongs to Core management.
+The evaluator defaults closed. Telegram identities are created untrusted/inactive
+and become usable only after Core management links them. An allowed decision
+appends an `authorization.decision` audit record in the same transaction. A
+denial appends it through an **independent** unit of work, so the record survives
+the rollback of the business transaction it denied; `AuthorizationDecision.audit_id`
+identifies that record. If no independent unit of work is available, the
+denial fails closed with `AuthorizationError` rather than skipping the record.
+Confirmation IDs resolve to the typed `confirmation` table rather than trusting
+an audit row's name.
+
+This boundary is a boundary against ordinary and accidental violations, not a
+sandbox: plugins are trusted in-process code (`contract.md` §38.16, see
+[PLUGIN_SPEC.md](PLUGIN_SPEC.md) § who-may-be-a-plugin).
+
 ## Clusters are a graph, not a tree
 
 Clusters group plugins by **business coherence** only. Explicitly *not*:
@@ -181,7 +217,7 @@ hierarchy. See [PLUGIN_SDK.md](PLUGIN_SDK.md).
 - Configure the runtime with:
 
   ```text
-  ATLAS_DATABASE_URL=postgresql+psycopg://atlas:atlas@localhost:5433/atlas_hq
+  ATLAS_DATABASE_URL=postgresql+psycopg://atlas:atlas@127.0.0.1:5433/atlas_hq
   ATLAS_DATABASE_SCHEMA=atlas
   ```
 
@@ -192,8 +228,10 @@ hierarchy. See [PLUGIN_SDK.md](PLUGIN_SDK.md).
 - URLs must use `postgresql+psycopg`; there is no alternate database fallback or
   substitute.
 - Core tables, owned by core alone, logical schema `atlas`: `employee`,
-  `organization`, `workplace`, `job`, `assignment`, `audit`, `outbox`.
+  `organization`, `workplace`, `job`, `assignment`, `principal`, `identity`,
+  `capability`, `role`, `role_capability`, `role_assignment`,
+  `capability_grant`, `confirmation`, `audit`, `outbox`.
   `outbox` deliberately lives in the same schema as the business tables.
 - Plugins never touch these tables.
 
-Last updated: 2026-09-24
+Last updated: 2026-09-25

@@ -1,12 +1,17 @@
-"""Capability identifiers.
+"""Capability identifiers and the small Core capability vocabulary."""
 
-A :data:`CapabilityId` names *who may perform an action* (contract section 35).
-Ids are dotted strings such as ``people.employee.create``. The wrapper is a
-``NewType`` so capability ids stay distinct from plain strings in signatures.
-"""
-
+from enum import StrEnum
 from typing import NewType
 
 CapabilityId = NewType("CapabilityId", str)
 
-__all__ = ["CapabilityId"]
+
+class CapabilityKind(StrEnum):
+    """The non-interchangeable permission kinds required by Core."""
+
+    VIEW = "view"
+    SCHEDULE = "schedule"
+    MANAGE = "manage"
+
+
+__all__ = ["CapabilityId", "CapabilityKind"]

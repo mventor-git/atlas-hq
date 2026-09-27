@@ -29,7 +29,7 @@ another plugin's objects. Sanctioned channels, in order:
 |---|---|---|
 | Information now | **Query** / contract `invoke` | `context.invoker.invoke(...)` |
 | Something happened | **Event** | `context.events.publish`, `context.dispatcher.subscribe` |
-| Who may act | **Capability** | `context.authorization.check` |
+| Who may act | **Capability** | typed `context.authorization.authorize` decision |
 | Which records | **Scope** | `context.scope.resolve` / `narrow` |
 | Mutate core state | **Core service port** | `context.people`, `context.jobs`, … |
 
@@ -129,7 +129,7 @@ are **skeletons — callable, in-memory, not persisted**:
 | Scheduling engine | skeleton: in-memory job list | `application/scheduling.py` |
 | Case engine | not implemented (Workflow is the nearest thing) | — |
 | Document / evidence foundation | not implemented | — |
-| Effective-dated policies | implemented (in-memory store) | `application/policy.py` |
+| Effective-dated policies | implemented and persisted in PostgreSQL (`UnitOfWorkPort.policies`) | `application/policy.py`, `infrastructure/persistence/policy.py` |
 
 The ports are stable; the backing stores are the only thing that changes.
 
