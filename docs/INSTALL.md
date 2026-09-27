@@ -82,6 +82,21 @@ asset to check it against, so the clone path says so out loud:
 .\start-demo.ps1 -InitializeOperator -OpenBrowser
 ```
 
+You do not have to pass `-SkipChecksum` twice. `start-demo.ps1` installs
+unless you pass `-SkipInstall`, and it chooses the installer's mode from the
+directory it is sitting in:
+
+- `SHA256SUMS.txt` is there — it is a release bundle, so `install.ps1` runs
+  with nothing added and verifies itself.
+- no `SHA256SUMS.txt`, and the directory is a repository checkout
+  (`pyproject.toml`, `src\atlas_core` and `web\package.json` are all present) —
+  it prints `source checkout: checksum verification skipped (-SkipChecksum)`
+  and installs without the check.
+- neither — it stops with the same advice `install.ps1` would have given, and
+  installs nothing.
+
+`-DryRun` prints which of the three it chose without running any of them.
+
 `-SkipChecksum` is for a source checkout and nothing else. It is the switch
 that removes the proof, so never pass it to a file you downloaded: if you
 downloaded `install.ps1`, download `SHA256SUMS.txt` from the same release into
@@ -289,8 +304,11 @@ throw. It also calls the launcher's own `Test-LoopbackHost`, lifted out of the
 file as written, on a table of hosts — so `127.0.0.1.example.com` and `127.1`
 are refused by behaviour rather than by a text scan — and proves the installer
 refuses a source root and an install root that differ, in a real run and in a
-dry run, before any install work. It starts no server, no container, and no
+dry run, before any install work. It also runs the launcher itself against a
+throwaway bundle three times — as a checkout it passes `-SkipChecksum` and says
+so, as a bundle it passes nothing, and as a directory that is neither it fails
+closed before the plan. It starts no server, no container, and no
 database, and it creates no virtual environment: the runs that must fail closed
 are pointed at an install root that is not there or is not the source root.
 
-Last updated: 2026-09-26
+Last updated: 2026-09-27

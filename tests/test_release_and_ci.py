@@ -412,6 +412,33 @@ def test_logs_are_ignored_and_the_scripts_are_not() -> None:
         )
 
 
+def test_the_generated_install_stamp_is_ignored() -> None:
+    # The gap this closes: install.ps1 writes `.atlas-install-stamp.json` into the
+    # install root, and 40.2 makes that the same directory as the source root, so
+    # running the installer from a clone leaves a generated file untracked in the
+    # repository - where the next `git status` and the next `git add -A` both see
+    # it. The name is read out of the installer rather than repeated here, so
+    # renaming the stamp cannot quietly leave it tracked again.
+    name = re.search(r"\$stampPath = Join-Path \$\w+Root '([^']+)'", _code(ROOT / "install.ps1"))
+    assert name, "install.ps1 no longer joins the install stamp to a root"
+    patterns = [
+        line.strip()
+        for line in _text(GITIGNORE).splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+    assert name.group(1) in patterns, (
+        f"{name.group(1)} is written by an install and is not in .gitignore"
+    )
+    # Anchored to a path, this pattern would only cover an install root one
+    # directory down, and the clone - the case that leaves the file in the tree -
+    # writes it at the root. The bare name covers every install root instead.
+    assert f"/{name.group(1)}" not in patterns, "the pattern is anchored to a subdirectory"
+    # The stamp is generated state. Ignoring it must not also hide the installer
+    # that writes it, which is the same release asset the stamp sits beside.
+    assert "install.ps1" not in patterns, "ignoring the stamp must not hide install.ps1"
+
+
 def test_the_release_workflow_runs_only_on_a_version_tag() -> None:
     trigger = [
         line.strip()
@@ -456,6 +483,75 @@ def test_the_release_pins_actions_to_a_major_and_prints_no_secret() -> None:
     for action in actions:
         assert re.fullmatch(r"[\w.-]+/[\w.-]+@v\d+", action), f"{action} is not pinned to a major"
     assert "secrets." not in text, "the token is the action's to use, never named here"
+
+
+# --- 40.4: the launcher runs the installer the way its directory is built -----
+
+
+def test_the_launcher_only_skips_the_checksum_in_a_source_checkout() -> None:
+    code = _code(ROOT / "start-demo.ps1")
+
+    # The defect this closes: the launcher ran `install.ps1` with no arguments
+    # at all, so a repository clone - which ships no release asset and so has no
+    # SHA256SUMS.txt beside the script - was refused by the installer's own
+    # 40.4 rule and the demo could not start. The launcher now decides, from the
+    # directory it is sitting in, which of the two the install is.
+    #
+    # Order is the whole guarantee: the checksum file is consulted first, and
+    # the switch is granted only on the branch reached when it is absent. A
+    # bundle with the file beside it is never even asked whether it looks like a
+    # checkout, so a release cannot be talked out of verifying itself.
+    assert code.index("SHA256SUMS.txt") < code.index("-SkipChecksum")
+    # Appended in exactly one place, and out loud: a silent skip is the thing
+    # 40.4 exists to prevent.
+    assert code.count("$installArguments += '-SkipChecksum'") == 1
+    assert "source checkout: checksum verification skipped" in code
+    # A source checkout, read as a whole rather than inferred from one file.
+    for marker in ("pyproject.toml", r"src\atlas_core", r"web\package.json"):
+        assert marker in code, f"the checkout test no longer looks for {marker}"
+    # Default deny: a directory that is neither a bundle nor a checkout is
+    # refused before the plan, with both ways out named.
+    assert "there is no SHA256SUMS.txt beside this script." in code
+    assert "Download install.ps1 and SHA256SUMS.txt from the same release" in code
+    assert r"run .\start-demo.ps1 from the repository root" in code
+
+
+def test_the_launcher_does_not_weaken_the_installer_checksum_rule() -> None:
+    launcher = _code(ROOT / "start-demo.ps1")
+    installer = _text(ROOT / "install.ps1")
+
+    # -SkipChecksum is install.ps1's own switch and install.ps1's own refusal is
+    # what keeps it narrow: a bundle whose bytes do not match is still refused,
+    # and the launcher only adds the switch where the file is absent entirely.
+    assert "if ($SkipChecksum)" in _code(ROOT / "install.ps1")
+    for refusal in (
+        "there is no SHA256SUMS.txt beside this installer.",
+        "install.ps1 does not match the SHA256SUMS.txt beside it.",
+    ):
+        assert refusal in installer, f"install.ps1 lost {refusal!r}"
+    # The launcher hands the switch over; it never computes or compares a digest
+    # itself, so there is no second, weaker rule next to the installer's.
+    for forbidden in ("Get-FileHash", "-ine "):
+        assert forbidden not in launcher, f"start-demo.ps1 grew {forbidden}"
+
+
+def test_the_windows_gate_proves_both_of_the_launchers_checksum_branches() -> None:
+    gate = _text(GATE)
+
+    # The branch is a property of the directory, so only running the launcher
+    # can show it: a text scan cannot tell a checkout from a bundle.
+    for marker in (
+        "Test-SourceCheckout",
+        "source checkout: checksum verification skipped",
+        "install.ps1 -SkipChecksum -DryRun",
+        "there is no SHA256SUMS.txt beside this script.",
+        "run .\\start-demo.ps1 from the repository root",
+        # The marker the third case removes to stop being a checkout.
+        r"src\atlas_core",
+    ):
+        assert marker in gate, f"the gate stopped proving {marker}"
+    # All three cases are dry runs, so proving the branches starts nothing.
+    assert gate.count("Invoke-Script -Path $launchDemo -Arguments @('-DryRun')") == 3
 
 
 # --- 40.3: the published port is loopback ------------------------------------

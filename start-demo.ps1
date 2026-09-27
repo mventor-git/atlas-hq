@@ -20,6 +20,12 @@
     It is a local development convenience, not a deployment path, and there is
     no flag that points it at a remote database.
 
+    It runs install.ps1 the way the directory it is sitting in is built. A
+    release bundle ships SHA256SUMS.txt beside the two scripts, so the install
+    verifies itself there. A repository checkout has no release asset to check
+    against, so the launcher passes -SkipChecksum itself and says so. A
+    directory that is neither is refused rather than installed.
+
 .PARAMETER InitializeOperator
     Run `atlas-hq operator-init` for the fixed local organization and principal
     before the servers start. Without this flag the command is printed and
@@ -71,6 +77,12 @@
     throws: a process it cannot reap is reported rather than raised, because a
     throw from a `finally` would hide the real error and skip the processes
     after it.
+
+    Contract section 40.4. The -SkipChecksum this script passes from a source
+    checkout is the installer's own switch and the installer's own rule: the
+    check still runs and still fails a released bundle whose bytes do not
+    match, because this script only ever adds the switch where no
+    SHA256SUMS.txt exists at all.
 #>
 [CmdletBinding()]
 param(
@@ -258,6 +270,24 @@ function Test-LoopbackHost {
     $address = $null
     if (-not [System.Net.IPAddress]::TryParse($candidate, [ref]$address)) { return $false }
     return [System.Net.IPAddress]::IsLoopback($address)
+}
+
+function Test-SourceCheckout {
+    <#
+        Whether these scripts are running from a repository checkout rather
+        than a release bundle. `pyproject.toml` and `web\package.json` are the
+        layout the check above already proved; `src\atlas_core` is the package
+        every installable part of Atlas-HQ comes from, and a directory without
+        it is not a tree this installer was written for.
+
+        One missing marker means "not a checkout", so the answer fails closed:
+        this is only ever asked to widen something, never to narrow it.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    foreach ($relative in @('pyproject.toml', 'src\atlas_core', 'web\package.json')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Path $relative))) { return $false }
+    }
+    return $true
 }
 
 function Read-ComposeEnvironment {
@@ -490,7 +520,28 @@ if ($SkipInstall) {
     # the install's own output. The child inherits the same execution policy
     # the operator already used to launch this script; neither script ever
     # changes that policy (contract 40.2).
+    #
+    # contract.md 40.4, decided here rather than left to the install: the release
+    # bundle ships SHA256SUMS.txt beside the two scripts, so a bundle installs
+    # with the check and nothing added; a checkout has no release asset to check
+    # against, so -SkipChecksum is passed, out loud. Neither is guessed at from
+    # the file names alone - install.ps1 still refuses a wrong digest either way,
+    # so what this decides is only ever whether the proof is offered, never
+    # whether it is believed.
+    $checksumFile = Join-Path $scriptDirectory 'SHA256SUMS.txt'
     $installArguments = @('-NoProfile', '-File', $installScript)
+    if (Test-Path -LiteralPath $checksumFile) {
+        Write-Ok "checksum file: $checksumFile"
+    } elseif (Test-SourceCheckout -Path $scriptDirectory) {
+        $installArguments += '-SkipChecksum'
+        Write-Note 'source checkout: checksum verification skipped (-SkipChecksum)'
+    } else {
+        Stop-Demo 'there is no SHA256SUMS.txt beside this script.' @(
+            "'$checksumFile' was not found next to install.ps1.",
+            'Download install.ps1 and SHA256SUMS.txt from the same release, and keep them in the same directory.',
+            'From a repository clone, run .\start-demo.ps1 from the repository root.'
+        )
+    }
     if ($DryRun) { $installArguments += '-DryRun' }
     Write-Detail (Format-Command 'powershell.exe' $installArguments)
     if (-not $DryRun) {

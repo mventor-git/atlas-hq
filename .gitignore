@@ -27,6 +27,13 @@ coverage.xml
 # tracked: *.ps1 and the tests that check them are release surface.
 logs/
 
+# install.ps1's generated stamp. It is written into the install root, and 40.2
+# makes that the same directory as the source root - so from a clone a real run
+# leaves this file sitting untracked in the repository. Unanchored, so the
+# install root is covered wherever it is. Generated state, like logs/ above and
+# not release surface: `git archive` ships the tracked tree, which has none.
+.atlas-install-stamp.json
+
 # Type checkers / linters
 .pyright/
 .ruff_cache/

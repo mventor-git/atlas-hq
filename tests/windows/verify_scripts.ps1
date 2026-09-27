@@ -37,6 +37,11 @@
     source root and an install root that differ, before any install work, and
     accepts one directory named twice.
 
+    Section 11 runs start-demo.ps1 against a stub bundle three times: as a
+    source checkout it passes -SkipChecksum and says so, as a release bundle it
+    passes nothing at all, and as a directory that is neither it fails closed
+    before the plan.
+
     Nothing here starts a server, a container, or a database: every check is a
     parse, a text scan, a dry run, or a run that is expected to fail closed
     before it can install anything.
@@ -358,11 +363,18 @@ function Invoke-Script {
 }
 
 function Invoke-DryRun {
-    param([Parameter(Mandatory)][string]$Path)
-    return Invoke-Script -Path $Path -Arguments @('-DryRun')
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [string[]]$Arguments = @()
+    )
+    return Invoke-Script -Path $Path -Arguments (@('-DryRun') + $Arguments)
 }
 
-$installDryRun = Invoke-DryRun -Path $installPath
+# -Force because the assertions below are about the *plan*, and on a machine
+# that has already run the installer its own plan is `already installed` - the
+# console steps it is meant to be checking would not be printed at all. It is a
+# dry run either way, so nothing is installed by passing it.
+$installDryRun = Invoke-DryRun -Path $installPath -Arguments @('-Force')
 Assert-True -Condition ($installDryRun.Exit -eq 0) `
     -Message "install.ps1 -DryRun exits 0 (got $($installDryRun.Exit))"
 Assert-Contains -Text $installDryRun.Text -Needle '.\start-demo.ps1 -InitializeOperator -OpenBrowser' `
@@ -409,6 +421,21 @@ Assert-NotMatches -Text $demoDryRun.Text -Pattern 'the demo is up' `
 Assert-NotMatches -Text $demoDryRun.Text -Pattern 'opened http' `
     -Message 'start-demo.ps1 -DryRun opens no browser'
 
+# Which install command the launcher picks is a property of the directory it is
+# sitting in, so this checkout is itself the case: a clone has no
+# SHA256SUMS.txt, and the launcher has to answer that rather than the operator.
+# (The release bundle is proved in section 11, against a stub that has one.)
+$repositorySums = Join-Path $repositoryRoot 'SHA256SUMS.txt'
+if (Test-Path -LiteralPath $repositorySums) {
+    Assert-NotMatches -Text $demoDryRun.Text -Pattern 'SkipChecksum' `
+        -Message 'start-demo.ps1 -DryRun adds no switch where a checksum file is present'
+} else {
+    Assert-Contains -Text $demoDryRun.Text -Needle 'source checkout: checksum verification skipped' `
+        -Message 'start-demo.ps1 -DryRun says why it skipped the checksum in this clone'
+    Assert-Contains -Text $demoDryRun.Text -Needle 'install.ps1 -SkipChecksum -DryRun' `
+        -Message 'start-demo.ps1 -DryRun plans the install the installer will accept from a clone'
+}
+
 $listeningAfter = Get-ListeningPorts -Ports $demoPorts
 Assert-True -Condition (($listeningBefore -join ',') -eq ($listeningAfter -join ',')) `
     -Message "no new listener appeared on 5433/8000/5175 (before: $($listeningBefore -join ','); after: $($listeningAfter -join ','))"
@@ -432,14 +459,19 @@ $bundle = Join-Path $sandbox 'bundle'
 $absentInstallRoot = Join-Path $bundle 'install-root-not-created'
 
 function New-StubBundle {
-    <# The minimum a directory needs to look like an Atlas-HQ source bundle. #>
+    <# The minimum a directory needs to look like an Atlas-HQ source bundle.
+       It carries what start-demo.ps1's own layout check asks for as well as
+       what install.ps1 asks for, so either script can be run against it. #>
     param([Parameter(Mandatory)][string]$Path)
     $null = New-Item -ItemType Directory -Path $Path -Force
-    foreach ($relative in @('src\atlas_hq', 'src\atlas_core', 'web')) {
+    foreach ($relative in @('src\atlas_hq', 'src\atlas_core', 'src\atlas_web', 'web')) {
         $null = New-Item -ItemType Directory -Path (Join-Path $Path $relative) -Force
     }
     Set-Content -LiteralPath (Join-Path $Path 'pyproject.toml') -Value '<project />'
     Set-Content -LiteralPath (Join-Path $Path 'web\package.json') -Value '{}'
+    # A dry run reads neither this file nor its contents; only its presence is
+    # part of the launcher's layout check.
+    Set-Content -LiteralPath (Join-Path $Path 'docker-compose.yml') -Value '# stub'
     # Both release scripts, because the release writes a checksum line for
     # each of them and a reader that took the wrong line would be a bug.
     Copy-Item -LiteralPath $installPath -Destination (Join-Path $Path 'install.ps1')
@@ -860,6 +892,91 @@ try {
 } finally {
     if (Test-Path -LiteralPath $rootSandbox) { Remove-Item -LiteralPath $rootSandbox -Recurse -Force }
 }
+
+# --- 11. the launcher picks the installer's checksum mode (contract 40.4) -----
+
+Write-Host '==> 11. start-demo.ps1 runs install.ps1 the way its directory is built' -ForegroundColor Cyan
+
+# The defect this closes: the launcher always ran `install.ps1` with no
+# arguments, so a repository clone - which has no release asset, and so no
+# SHA256SUMS.txt beside it - was refused by the installer's own checksum rule
+# and the demo could not start. The fix has to be narrow in both directions: a
+# release bundle still verifies itself, and a directory that is neither a
+# bundle nor a checkout still fails closed. Only a text scan cannot tell those
+# apart, so the launcher is run against all three.
+Assert-Contains -Text $demoCode -Needle 'Test-SourceCheckout' `
+    -Message 'start-demo.ps1 decides from the directory it is running in'
+
+$launchSandbox = Join-Path ([System.IO.Path]::GetTempPath()) `
+    ("atlas-hq-verify-launch-{0}-{1}" -f $PID, ([guid]::NewGuid().ToString('n').Substring(0, 8)))
+$launchBundle = Join-Path $launchSandbox 'bundle'
+$launchDemo = Join-Path $launchBundle 'start-demo.ps1'
+$launchSums = Join-Path $launchBundle 'SHA256SUMS.txt'
+try {
+    $null = New-StubBundle -Path $launchBundle
+
+    # 1. A source checkout: no checksum file, and the markers that make it one.
+    # The bundle runs, the install is planned with -SkipChecksum, and the reason
+    # is printed. -DryRun so the plan is proved and nothing is installed.
+    $checkoutRun = Invoke-Script -Path $launchDemo -Arguments @('-DryRun')
+    Assert-True -Condition ($checkoutRun.Exit -eq 0) `
+        -Message "a source checkout plans its install (got $($checkoutRun.Exit))"
+    Assert-Contains -Text $checkoutRun.Text -Needle 'source checkout: checksum verification skipped' `
+        -Message 'the clone path says the check was skipped'
+    Assert-Contains -Text $checkoutRun.Text -Needle 'install.ps1 -SkipChecksum -DryRun' `
+        -Message 'the clone path plans install.ps1 -SkipChecksum'
+    Assert-NotMatches -Text $checkoutRun.Text -Pattern 'there is no SHA256SUMS.txt beside this script' `
+        -Message 'a checkout is not refused for the absent checksum file'
+    Assert-Contains -Text $checkoutRun.Text -Needle 'dry run complete: nothing was started, nothing was written' `
+        -Message 'the clone path reaches the plan'
+
+    # 2. A release bundle: the checksum file is there, so it is installed with
+    # no switch at all and the proof is left to the installer. The content is
+    # never read - this is the launcher's decision, not a second verification -
+    # so a stub file is enough to prove it.
+    Set-Content -LiteralPath $launchSums -Value '# stub' -Encoding ASCII
+    $bundleRun = Invoke-Script -Path $launchDemo -Arguments @('-DryRun')
+    Assert-True -Condition ($bundleRun.Exit -eq 0) `
+        -Message "a bundle with a checksum file plans its install (got $($bundleRun.Exit))"
+    Assert-NotMatches -Text $bundleRun.Text -Pattern 'SkipChecksum' `
+        -Message 'a release bundle is installed with the checksum check intact'
+    Assert-NotMatches -Text $bundleRun.Text -Pattern 'source checkout' `
+        -Message 'a release bundle is not called a source checkout'
+    Assert-Contains -Text $bundleRun.Text -Needle 'install.ps1 -DryRun' `
+        -Message 'the bundle path plans the plain install.ps1 -DryRun'
+
+    # 3. Neither: a directory that is not a bundle and not a checkout fails
+    # closed, at the install step and before anything is started. `src\atlas_core`
+    # is the marker that makes this one stop being a checkout.
+    Remove-Item -LiteralPath $launchSums
+    Remove-Item -LiteralPath (Join-Path $launchBundle 'src\atlas_core') -Recurse -Force
+    $neitherRun = Invoke-Script -Path $launchDemo -Arguments @('-DryRun')
+    Assert-True -Condition ($neitherRun.Exit -ne 0) `
+        -Message "a directory that is neither a bundle nor a checkout is refused (got $($neitherRun.Exit))"
+    Assert-Contains -Text $neitherRun.Text -Needle 'there is no SHA256SUMS.txt beside this script.' `
+        -Message 'the refusal names the missing checksum file'
+    Assert-Contains -Text $neitherRun.Text -Needle 'Download install.ps1 and SHA256SUMS.txt from the same release' `
+        -Message 'the refusal says where a bundle comes from'
+    Assert-Contains -Text $neitherRun.Text -Needle 'run .\start-demo.ps1 from the repository root' `
+        -Message 'the refusal names the clone way out'
+    Assert-NotMatches -Text $neitherRun.Text -Pattern 'SkipChecksum' `
+        -Message 'the refused run never passes -SkipChecksum'
+    Assert-NotMatches -Text $neitherRun.Text -Pattern 'dry run complete|the demo is up' `
+        -Message 'the refused run is refused before the plan'
+} finally {
+    if (Test-Path -LiteralPath $launchSandbox) { Remove-Item -LiteralPath $launchSandbox -Recurse -Force }
+}
+
+# The installer's own rule is untouched: it is what makes the branch above
+# narrow. A bundle whose bytes do not match is still refused by the installer,
+# and the launcher only ever adds the switch where the file is absent entirely.
+Assert-Contains -Text $installRaw -Needle 'there is no SHA256SUMS.txt beside this installer.' `
+    -Message 'install.ps1 still refuses an absent checksum file of its own accord'
+Assert-Contains -Text $installRaw -Needle 'install.ps1 does not match the SHA256SUMS.txt beside it.' `
+    -Message 'install.ps1 still refuses a digest that does not match'
+$listeningAfterLaunch = Get-ListeningPorts -Ports $demoPorts
+Assert-True -Condition (($listeningAfterLaunch -join ',') -eq ($listeningBefore -join ',')) `
+    -Message "no checksum-branch run started a listener (before: $($listeningBefore -join ','); after: $($listeningAfterLaunch -join ','))"
 
 # --- summary -----------------------------------------------------------------
 
